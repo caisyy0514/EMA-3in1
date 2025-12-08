@@ -323,33 +323,52 @@ const analyzeCoin = async (
     // --- Prompt Construction ---
     const systemPrompt = `
 你是一个严格执行 **${coinKey} EMA 趋势追踪策略** 的交易机器人。
+**严禁** 使用任何其他指标（RSI, MACD, KDJ 等），只关注 EMA15 和 EMA60。
 当前时间: ${new Date().toLocaleString()}
 
-**策略状态**:
-1. **1H 趋势**: ${trend1H.direction} (${trend1H.description})
-   - 判定规则: 只要EMA15 > EMA60即为UP，EMA15 < EMA60即为DOWN，K线颜色仅代表强度。
-2. **3m 结构**: ${entry3m.structure}
-3. **3m 入场信号**: ${entry3m.signal ? entry3m.action + " triggered" : "None"} (Reason: ${entry3m.reason})
-4. **计算建议**: Action=${finalAction}, SL=${finalSL || "Keep"}
+**当前市场状态**:
+- 1H 趋势 (趋势判断): ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})
+- 3m 信号 (入场时机): ${entry3m.signal ? "TRIGGERED" : "WAITING"}
+- 3m 信号详情: ${entry3m.reason}
+- 计算止损位 (SL): ${entry3m.sl}
+
+**持仓状态**:
+${posAnalysis}
+
+**策略规则 (Strategy Rules)**:
+1.1H 趋势 (趋势判断): ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
+- 只要EMA15 > EMA60 且 K线阳线即为UP。
+   - 只要EMA15 < EMA60 且 K线阴线即为DOWN
+2. **入场逻辑 (3m)**: 
+   - 必须在 1H 趋势方向上操作。
+   - 看涨时: 等待 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。在金叉形成的 K 线收盘买入。
+   - 看跌时: 等待 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。在死叉形成的 K 线收盘卖出。
+3. **资金管理 (Rolling)**:
+   - 首仓 5% 资金。
+   - 每盈利 5% 加仓 5%。
+4. **止损管理**:
+   - 初始止损: 入场前一波反向交叉的极值 (Long用死叉期最低价, Short用金叉期最高价)。
+   - 移动止损: 净利为正后，随后跟随前5根 3m K线高低点移动，只能往利润更高的方向移动（持有多单向上移动，持有空单向下移动）。
+5. **反转离场**:
+   - 如果 1H 趋势反转 (与持仓方向相反)，立即平仓。
 
 **执行规则**:
 - 只有当 1H 趋势明确(UP/DOWN) 且 3m 出现特定交叉形态(死后金/金后死)才开仓。
 - 首仓 5% 权益。
 - 盈利 > 5% 权益时滚仓加码 5%。
 - 趋势反转立即平仓。
+- 如果有持仓 且 需要移动止损 -> UPDATE_TPSL (Set new SL).
 - 默认杠杆固定为 ${DEFAULT_LEVERAGE}x。
-
 **输出要求**:
 1. 返回格式必须为 JSON。
-2. **重要**: 所有文本分析字段必须使用 **中文 (Simplified Chinese)** 输出。
-3. **hot_events_overview** 字段：翻译并提炼新闻热点摘要。
-4. **market_assessment** 字段：必须明确包含：
-   - 【1H趋势】：${trend1H.description}
-   - 【3m入场】：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}
+2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
+3. **hot_events_overview** 字段：请仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
+4. **market_assessment** 字段：必须明确包含以下两行结论：
+   - 【1H趋势】：明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨、下跌还是震荡。
+   - 【3m入场】：明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
 请基于上述计算结果生成 JSON 决策。
 `;
-
     try {
         const text = await callDeepSeek(apiKey, [
             { role: "system", content: systemPrompt },
