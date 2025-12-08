@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { AIDecision } from '../types';
 import { Activity, Flame, TrendingUp, Zap, Target, AlertCircle } from 'lucide-react';
@@ -40,10 +39,10 @@ const DecisionReport: React.FC<Props> = ({ decision }) => {
             </div>
             <div className="space-y-2">
                     <h4 className="flex items-center gap-2 text-indigo-400 font-bold uppercase tracking-wider text-xs">
-                    <Zap size={14}/> 04. ETH 专项分析
+                    <Zap size={14}/> 04. {decision.coin || 'ETH'} 专项分析
                     </h4>
                     <div className="p-4 bg-gray-900/50 border border-indigo-500/20 rounded-lg h-full">
-                    {decision.eth_analysis}
+                    {decision.coin_analysis}
                     </div>
             </div>
         </div>

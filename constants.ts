@@ -1,7 +1,27 @@
 
+export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; tickSize: number; displayName: string }> = {
+  ETH: { 
+    instId: "ETH-USDT-SWAP", 
+    contractVal: 0.1, 
+    tickSize: 0.01, 
+    displayName: "ETH" 
+  },
+  SOL: { 
+    instId: "SOL-USDT-SWAP", 
+    contractVal: 1.0, 
+    tickSize: 0.01, 
+    displayName: "SOL" 
+  },
+  DOGE: { 
+    instId: "DOGE-USDT-SWAP", 
+    contractVal: 10.0, // OKX Standard for Swap is often 10 or 100. Assuming 10 for safety, verify with exchange if needed.
+    tickSize: 0.00001, 
+    displayName: "DOGE" 
+  }
+};
+
+// Deprecated single constants, kept for reference but unused in new logic
 export const INSTRUMENT_ID = "ETH-USDT-SWAP";
-// OKX V5 规范: ETH-USDT-SWAP 1张合约 = 0.1 ETH
-// 注意: 实际交易前请核对 OKX 文档，部分币种为 0.01 或 10 USD
 export const CONTRACT_VAL_ETH = 0.1;
 
 // 费率设定 (保守估计 Taker 0.05%)
@@ -29,7 +49,7 @@ export const STRATEGY_STAGES = {
 };
 
 export const MOCK_TICKER = {
-  instId: INSTRUMENT_ID,
+  instId: "ETH-USDT-SWAP",
   last: "3250.50",
   lastSz: "1.2",
   askPx: "3250.60",

@@ -1,6 +1,6 @@
 
-import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext } from "../types";
-import { INSTRUMENT_ID, MOCK_TICKER, CONTRACT_VAL_ETH, DEFAULT_LEVERAGE } from "../constants";
+import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext, SingleMarketData } from "../types";
+import { COIN_CONFIG, DEFAULT_LEVERAGE, MOCK_TICKER } from "../constants";
 import CryptoJS from 'crypto-js';
 
 const randomVariation = (base: number, percent: number) => {
@@ -29,50 +29,105 @@ const getHeaders = (method: string, requestPath: string, body: string = '', conf
   };
 };
 
+// EMA Calculation Helper inside Data Service
+const calculateEMA = (data: CandleData[], period: number): number[] => {
+  if (data.length === 0) return [];
+  const k = 2 / (period + 1);
+  const result: number[] = [];
+  
+  // Use first close as initial EMA
+  let ema = parseFloat(data[0].c);
+  result.push(ema);
+  
+  for (let i = 1; i < data.length; i++) {
+    const price = parseFloat(data[i].c);
+    ema = price * k + ema * (1 - k);
+    result.push(ema);
+  }
+  return result;
+};
+
+// Populate candles with EMA15 and EMA60
+const enrichCandlesWithEMA = (candles: CandleData[]): CandleData[] => {
+    if(!candles || candles.length === 0) return [];
+    
+    // API returns newest first (index 0 is latest time), but EMA calculation is easier with oldest first.
+    // However, our formatCandles currently reverses them to be Oldest -> Newest (Chart friendly).
+    // Let's ensure they are Oldest -> Newest before calculating.
+    
+    const ema15 = calculateEMA(candles, 15);
+    const ema60 = calculateEMA(candles, 60);
+    
+    return candles.map((c, i) => ({
+        ...c,
+        ema15: ema15[i],
+        ema60: ema60[i]
+    }));
+};
+
+async function fetchSingleCoinData(coinKey: string, config: any): Promise<SingleMarketData> {
+    const instId = COIN_CONFIG[coinKey].instId;
+    
+    const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${instId}`);
+    const tickerJson = await tickerRes.json();
+    
+    // Existing (Optional but kept for compatibility)
+    const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=5m&limit=50`);
+    const candles5mJson = await candles5mRes.json();
+    
+    // 15m (Kept for compatibility)
+    const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=15m&limit=50`);
+    const candles15mJson = await candles15mRes.json();
+
+    // NEW: 1H for Trend - Increased to 300 to ensure EMA60 is accurate
+    const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=1H&limit=300`);
+    const candles1HJson = await candles1HRes.json();
+
+    // NEW: 3m for Entry/Exit - Increased limit to 300 to capture pre-cross intervals
+    const candles3mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=3m&limit=300`);
+    const candles3mJson = await candles3mRes.json();
+
+    const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${instId}`);
+    const fundingJson = await fundingRes.json();
+    
+    const oiRes = await fetch(`${BASE_URL}/api/v5/public/open-interest?instId=${instId}`);
+    const oiJson = await oiRes.json();
+
+    if (tickerJson.code !== '0') throw new Error(`OKX API Error (Ticker ${coinKey}): ${tickerJson.msg}`);
+
+    return {
+      ticker: tickerJson.data[0],
+      candles5m: formatCandles(candles5mJson.data),
+      candles15m: formatCandles(candles15mJson.data),
+      candles1H: enrichCandlesWithEMA(formatCandles(candles1HJson.data)),
+      candles3m: enrichCandlesWithEMA(formatCandles(candles3mJson.data)),
+      fundingRate: fundingJson.data[0]?.fundingRate || "0",
+      openInterest: oiJson.data[0]?.oi || "0",
+      orderbook: {}, 
+      trades: [],
+    };
+}
+
 export const fetchMarketData = async (config: any): Promise<MarketDataCollection> => {
   if (config.isSimulation) {
     return generateMockMarketData();
   }
 
   try {
-    const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${INSTRUMENT_ID}`);
-    const tickerJson = await tickerRes.json();
+    const results: Partial<MarketDataCollection> = {};
+    const promises = Object.keys(COIN_CONFIG).map(async (coin) => {
+        try {
+            const data = await fetchSingleCoinData(coin, config);
+            results[coin] = data;
+        } catch (e: any) {
+            console.error(`Failed to fetch data for ${coin}:`, e.message);
+            // We might want to omit this coin or return partial data
+        }
+    });
     
-    // Existing (Optional but kept for compatibility)
-    const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=5m&limit=50`);
-    const candles5mJson = await candles5mRes.json();
-    
-    // 15m (Kept for compatibility)
-    const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=15m&limit=50`);
-    const candles15mJson = await candles15mRes.json();
+    await Promise.all(promises);
+    return results as MarketDataCollection;
 
-    // NEW: 1H for Trend - Increased to 300 to ensure EMA60 is accurate
-    const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=1H&limit=300`);
-    const candles1HJson = await candles1HRes.json();
-
-    // NEW: 3m for Entry/Exit - Increased limit to 300 to capture pre-cross intervals
-    const candles3mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${INSTRUMENT_ID}&bar=3m&limit=300`);
-    const candles3mJson = await candles3mRes.json();
-
-    const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${INSTRUMENT_ID}`);
-    const fundingJson = await fundingRes.json();
-    
-    const oiRes = await fetch(`${BASE_URL}/api/v5/public/open-interest?instId=${INSTRUMENT_ID}`);
-    const oiJson = await oiRes.json();
-
-    if (tickerJson.code !== '0') throw new Error(`OKX API Error (Ticker): ${tickerJson.msg}`);
-
-    return {
-      ticker: tickerJson.data[0],
-      candles5m: formatCandles(candles5mJson.data),
-      candles15m: formatCandles(candles15mJson.data),
-      candles1H: formatCandles(candles1HJson.data),
-      candles3m: formatCandles(candles3mJson.data),
-      fundingRate: fundingJson.data[0]?.fundingRate || "0",
-      openInterest: oiJson.data[0]?.oi || "0",
-      orderbook: {}, 
-      trades: [],
-    };
   } catch (error: any) {
     console.error("OKX API 获取失败:", error);
     throw new Error(`无法连接 OKX API: ${error.message}`);
@@ -80,10 +135,10 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 };
 
 // Fetch Pending Algo Orders (TP/SL)
-const fetchAlgoOrders = async (config: any): Promise<any[]> => {
+const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        const path = `/api/v5/trade/orders-algo-pending?instId=${INSTRUMENT_ID}&ordType=conditional,oco`;
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -105,8 +160,8 @@ export const fetchAccountData = async (config: any): Promise<AccountContext> => 
     const balRes = await fetch(BASE_URL + balPath, { method: 'GET', headers: balHeaders });
     const balJson = await balRes.json();
 
-    // Fetch positions for the specific instrument, or remove instId param to fetch all
-    const posPath = `/api/v5/account/positions?instId=${INSTRUMENT_ID}`;
+    // Fetch positions for ALL instruments
+    const posPath = `/api/v5/account/positions?instType=SWAP`;
     const posHeaders = getHeaders('GET', posPath, '', config);
     const posRes = await fetch(BASE_URL + posPath, { method: 'GET', headers: posHeaders });
     const posJson = await posRes.json();
@@ -118,34 +173,51 @@ export const fetchAccountData = async (config: any): Promise<AccountContext> => 
     let positions: PositionData[] = [];
     
     if (posJson.data && posJson.data.length > 0) {
-        const algoOrders = await fetchAlgoOrders(config);
-        
-        positions = posJson.data.map((rawPos: any) => {
-            const position: PositionData = {
-                instId: rawPos.instId,
-                posSide: rawPos.posSide,
-                pos: rawPos.pos,
-                avgPx: rawPos.avgPx,
-                breakEvenPx: rawPos.breakEvenPx, // Map Exchange Breakeven Price
-                upl: rawPos.upl,
-                uplRatio: rawPos.uplRatio,
-                mgnMode: rawPos.mgnMode,
-                margin: rawPos.margin,
-                liqPx: rawPos.liqPx,
-                cTime: rawPos.cTime,
-                leverage: rawPos.lever
-            };
-            
-             // Find SL/TP orders specific to this position side
-             if (algoOrders.length > 0) {
-                 const slOrder = algoOrders.find((o: any) => o.instId === rawPos.instId && o.posSide === rawPos.posSide && o.slTriggerPx && parseFloat(o.slTriggerPx) > 0);
-                 const tpOrder = algoOrders.find((o: any) => o.instId === rawPos.instId && o.posSide === rawPos.posSide && o.tpTriggerPx && parseFloat(o.tpTriggerPx) > 0);
-                 
-                 if (slOrder) position.slTriggerPx = slOrder.slTriggerPx;
-                 if (tpOrder) position.tpTriggerPx = tpOrder.tpTriggerPx;
-             }
-             return position;
-        });
+        // Filter only positions relevant to our supported coins
+        const supportedInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
+        const relevantPositions = posJson.data.filter((p: any) => supportedInstIds.includes(p.instId));
+
+        if (relevantPositions.length > 0) {
+             // We need to fetch Algo orders for EACH relevant position's instrument
+             // Optimization: Fetch all algos in loop? Or just assume one call per instrument if API requires it.
+             // OKX pending algos API requires instId or it returns for all? Docs say instId optional but recommended.
+             // Let's fetch for each relevant instId in parallel.
+             
+             const uniqueInstIds = [...new Set(relevantPositions.map((p: any) => p.instId))];
+             const algoOrdersMap: Record<string, any[]> = {};
+             
+             await Promise.all(uniqueInstIds.map(async (instId: any) => {
+                 algoOrdersMap[instId] = await fetchAlgoOrders(instId, config);
+             }));
+
+             positions = relevantPositions.map((rawPos: any) => {
+                const position: PositionData = {
+                    instId: rawPos.instId,
+                    posSide: rawPos.posSide,
+                    pos: rawPos.pos,
+                    avgPx: rawPos.avgPx,
+                    breakEvenPx: rawPos.breakEvenPx,
+                    upl: rawPos.upl,
+                    uplRatio: rawPos.uplRatio,
+                    mgnMode: rawPos.mgnMode,
+                    margin: rawPos.margin,
+                    liqPx: rawPos.liqPx,
+                    cTime: rawPos.cTime,
+                    leverage: rawPos.lever
+                };
+                
+                 // Find SL/TP orders specific to this position side
+                 const algos = algoOrdersMap[rawPos.instId] || [];
+                 if (algos.length > 0) {
+                     const slOrder = algos.find((o: any) => o.posSide === rawPos.posSide && o.slTriggerPx && parseFloat(o.slTriggerPx) > 0);
+                     const tpOrder = algos.find((o: any) => o.posSide === rawPos.posSide && o.tpTriggerPx && parseFloat(o.tpTriggerPx) > 0);
+                     
+                     if (slOrder) position.slTriggerPx = slOrder.slTriggerPx;
+                     if (tpOrder) position.tpTriggerPx = tpOrder.tpTriggerPx;
+                 }
+                 return position;
+            });
+        }
     }
     
     return {
@@ -209,10 +281,12 @@ const ensureLongShortMode = async (config: any) => {
 
 export const executeOrder = async (order: AIDecision, config: any): Promise<any> => {
   if (config.isSimulation) {
-    console.log("SIMULATION: Executing Order", order);
+    console.log(`[${order.coin}] SIMULATION: Executing Order`, order);
     return { code: "0", msg: "模拟下单成功", data: [{ ordId: "sim_" + Date.now() }] };
   }
   
+  const targetInstId = order.instId;
+
   try {
     // 0. Ensure Position Mode is correct
     try {
@@ -227,7 +301,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         
         // 1. 尝试平多单 (Try Closing LONG)
         const closeLongBody = JSON.stringify({
-            instId: INSTRUMENT_ID,
+            instId: targetInstId,
             posSide: 'long', 
             mgnMode: 'isolated'
         });
@@ -239,7 +313,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         
         // 2. 如果平多单失败，尝试平空单 (Try Closing SHORT)
         const closeShortBody = JSON.stringify({ 
-            instId: INSTRUMENT_ID, 
+            instId: targetInstId, 
             posSide: 'short', 
             mgnMode: 'isolated' 
         });
@@ -264,9 +338,9 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
 
     // 2. Set Leverage First (Crucial for V5)
     try {
-        await setLeverage(INSTRUMENT_ID, order.leverage || DEFAULT_LEVERAGE, posSide, config);
+        await setLeverage(targetInstId, order.leverage || DEFAULT_LEVERAGE, posSide, config);
     } catch (e: any) {
-        throw new Error(`无法设置战神策略杠杆: ${e.message}`);
+        throw new Error(`无法设置杠杆: ${e.message}`);
     }
 
     // 3. Prepare Order with Attached Algo Orders (TP/SL)
@@ -283,7 +357,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     const sizeStr = sizeFloat.toFixed(2);
 
     const bodyObj: any = {
-        instId: INSTRUMENT_ID,
+        instId: targetInstId,
         tdMode: "isolated", 
         side: side,
         posSide: posSide, 
@@ -330,27 +404,26 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     return json;
 
   } catch (error: any) {
-      console.error("Trade execution failed:", error);
+      console.error(`Trade execution failed for ${targetInstId}:`, error);
       throw error;
   }
 };
 
 export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'short', size: string, slPrice?: string, tpPrice?: string, config?: any) => {
     if (config.isSimulation) {
-        console.log(`[SIM] Updated TP/SL for ${posSide}: SL=${slPrice}, TP=${tpPrice}, Size=${size}`);
+        console.log(`[SIM] Updated TP/SL for ${instId} ${posSide}: SL=${slPrice}, TP=${tpPrice}, Size=${size}`);
         return { code: "0", msg: "模拟更新成功" };
     }
 
     try {
         // 1. Fetch existing algo orders (Pre-fetch to know what to cancel later)
-        const pendingAlgos = await fetchAlgoOrders(config);
+        const pendingAlgos = await fetchAlgoOrders(instId, config);
         
         const toCancel = pendingAlgos
             .filter((o: any) => o.instId === instId && o.posSide === posSide)
             .map((o: any) => ({ algoId: o.algoId, instId }));
 
         // 2. Place new Algo Order (Conditional Close) FIRST
-        // If placing fails, we throw and DO NOT cancel old orders (safeguard)
         if (slPrice || tpPrice) {
             const path = "/api/v5/trade/order-algo";
             
@@ -393,7 +466,7 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
              if (toCancel.length === 0) return { code: "0", msg: "无新的止盈止损价格" };
         }
 
-        // 3. Cancel existing SL/TP orders ONLY after new ones are successfully placed (or if we are just clearing)
+        // 3. Cancel existing SL/TP orders ONLY after new ones are successfully placed
         if (toCancel.length > 0) {
             const cancelPath = "/api/v5/trade/cancel-algos";
             const cancelBody = JSON.stringify(toCancel);
@@ -441,38 +514,48 @@ function formatCandles(apiCandles: any[]): CandleData[] {
 
 function generateMockMarketData(): MarketDataCollection {
   const now = Date.now();
-  const currentPrice = 3250 + Math.sin(now / 10000) * 50; 
-  const generateCandles = (count: number, intervalMs: number) => {
-    const candles: CandleData[] = [];
-    let price = currentPrice;
-    for (let i = 0; i < count; i++) {
-      const ts = (now - i * intervalMs).toString();
-      const open = price;
-      const close = randomVariation(open, 0.5);
-      candles.push({ 
-          ts, 
-          o: open.toFixed(2), 
-          h: (Math.max(open, close) + 2).toFixed(2), 
-          l: (Math.min(open, close) - 2).toFixed(2), 
-          c: close.toFixed(2), 
-          vol: (Math.random() * 100).toFixed(2) 
-      });
-      price = parseFloat(open.toFixed(2)) + (Math.random() - 0.5) * 10;
-    }
-    return candles.reverse();
-  };
+  const result: any = {};
+  
+  Object.keys(COIN_CONFIG).forEach(coin => {
+      const config = COIN_CONFIG[coin];
+      // Mock different prices
+      const basePrice = coin === 'ETH' ? 3250 : coin === 'SOL' ? 145 : 0.35;
+      const currentPrice = basePrice + Math.sin(now / 10000) * (basePrice * 0.01);
+      
+      const generateCandles = (count: number, intervalMs: number) => {
+        const candles: CandleData[] = [];
+        let price = currentPrice;
+        for (let i = 0; i < count; i++) {
+          const ts = (now - i * intervalMs).toString();
+          const open = price;
+          const close = randomVariation(open, 0.5);
+          candles.push({ 
+              ts, 
+              o: open.toFixed(2), 
+              h: (Math.max(open, close) + basePrice * 0.005).toFixed(2), 
+              l: (Math.min(open, close) - basePrice * 0.005).toFixed(2), 
+              c: close.toFixed(2), 
+              vol: (Math.random() * 100).toFixed(2) 
+          });
+          price = parseFloat(open.toFixed(2)) + (Math.random() - 0.5) * (basePrice * 0.01);
+        }
+        return enrichCandlesWithEMA(candles.reverse());
+      };
 
-  return {
-    ticker: { ...MOCK_TICKER, last: currentPrice.toFixed(2), ts: now.toString() },
-    candles5m: generateCandles(50, 300000),
-    candles15m: generateCandles(50, 900000),
-    candles1H: generateCandles(100, 3600000), 
-    candles3m: generateCandles(300, 180000), 
-    fundingRate: "0.0001",
-    openInterest: "50000",
-    orderbook: [],
-    trades: []
-  };
+      result[coin] = {
+        ticker: { ...MOCK_TICKER, instId: config.instId, last: currentPrice.toFixed(2), ts: now.toString() },
+        candles5m: generateCandles(50, 300000),
+        candles15m: generateCandles(50, 900000),
+        candles1H: generateCandles(100, 3600000), 
+        candles3m: generateCandles(300, 180000), 
+        fundingRate: "0.0001",
+        openInterest: "50000",
+        orderbook: [],
+        trades: []
+      };
+  });
+  
+  return result;
 }
 
 function generateMockAccountData(): AccountContext {

@@ -20,6 +20,9 @@ export interface CandleData {
   l: string;
   c: string;
   vol: string;
+  // EMA data populated by service
+  ema15?: number;
+  ema60?: number;
 }
 
 export interface AccountBalance {
@@ -52,10 +55,10 @@ export interface AccountContext {
   positions: PositionData[];
 }
 
-export interface MarketDataCollection {
+export interface SingleMarketData {
   ticker: TickerData | null;
-  candles5m: CandleData[]; // Kept for legacy or detail view
-  candles15m: CandleData[]; // Kept for legacy
+  candles5m: CandleData[]; 
+  candles15m: CandleData[];
   candles1H: CandleData[]; // NEW: For Trend Analysis
   candles3m: CandleData[]; // NEW: For Entry/Exit Analysis
   fundingRate: string;
@@ -64,12 +67,18 @@ export interface MarketDataCollection {
   trades: any[];
 }
 
+// Map of Coin Symbol (ETH, SOL, DOGE) to its market data
+export type MarketDataCollection = Record<string, SingleMarketData>;
+
 // AI Decision Types - ETH EMA Tracking Structure
 export interface AIDecision {
+  coin: string;   // e.g., 'ETH'
+  instId: string; // e.g., 'ETH-USDT-SWAP'
+  
   stage_analysis: string;
   market_assessment: string;
   hot_events_overview: string; 
-  eth_analysis: string;
+  coin_analysis: string; // Renamed from eth_analysis
   trading_decision: {
     action: 'buy' | 'sell' | 'hold' | 'close' | 'update_tpsl'; 
     confidence: string; // "0-100%"
