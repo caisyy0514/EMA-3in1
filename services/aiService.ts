@@ -130,73 +130,104 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
     
     const i = candles.length - 1; // Latest completed candle
     const curr = candles[i] as any;
-    const prev = candles[i-1] as any;
-
-    if (!curr.ema15 || !curr.ema60 || !prev.ema15 || !prev.ema60) {
+    
+    if (!curr.ema15 || !curr.ema60) {
          return { signal: false, action: 'HOLD', sl: 0, reason: "指标数据不足", structure: "未知" };
     }
     
     const currentGold = curr.ema15 > curr.ema60;
     const structure = currentGold ? "金叉多头区域" : "死叉空头区域";
+    const LOOKBACK_WINDOW = 3; // Scan last 3 candles for signal
 
     // Long Logic: Trend UP -> Find Death Cross -> Then Gold Cross
     if (trendDirection === 'UP') {
-        const justCrossedUp = curr.ema15 > curr.ema60 && prev.ema15 <= prev.ema60;
-        
-        if (justCrossedUp) {
-            let foundDeathZone = false;
-            let lowestInDeathZone = parseFloat(curr.l); // Start tracking SL
+        // Must be in Gold structure currently to consider buying
+        if (!currentGold) {
+             return { signal: false, action: 'HOLD', sl: 0, reason: "1H上涨，但3m当前处于死叉区域", structure };
+        }
+
+        // Look back for the crossover event within the window
+        for (let k = 0; k < LOOKBACK_WINDOW; k++) {
+            const idx = i - k;
+            if (idx < 1) break;
             
-            for (let x = i - 1; x >= 0; x--) {
-                const c = candles[x] as any;
-                if (c.ema15 < c.ema60) {
-                    foundDeathZone = true;
-                    const low = parseFloat(c.l);
-                    if (low < lowestInDeathZone) lowestInDeathZone = low;
-                } else {
-                    if (foundDeathZone) break;
+            const c = candles[idx] as any;
+            const p = candles[idx-1] as any;
+            
+            // Check for crossover at this candle: EMA15 crossed UP EMA60
+            const crossedUp = c.ema15 > c.ema60 && p.ema15 <= p.ema60;
+            
+            if (crossedUp) {
+                let foundDeathZone = false;
+                let lowestInDeathZone = parseFloat(c.l); // Start tracking SL from crossover candle
+                
+                // Scan backwards from p (idx-1) to validate Death Zone
+                for (let x = idx - 1; x >= 0; x--) {
+                    const prevC = candles[x] as any;
+                    if (prevC.ema15 < prevC.ema60) {
+                        foundDeathZone = true;
+                        const low = parseFloat(prevC.l);
+                        if (low < lowestInDeathZone) lowestInDeathZone = low;
+                    } else {
+                        // Found a gold cross before death zone, stop scanning
+                        if (foundDeathZone) break;
+                    }
                 }
-            }
-            
-            if (foundDeathZone) {
-                return { 
-                    signal: true, 
-                    action: 'BUY', 
-                    sl: lowestInDeathZone, 
-                    reason: "1H上涨 + 3m死叉后金叉",
-                    structure
-                };
+                
+                if (foundDeathZone) {
+                    return { 
+                        signal: true, 
+                        action: 'BUY', 
+                        sl: lowestInDeathZone, 
+                        reason: `1H上涨 + 3m死叉后金叉 (信号延迟${k}根K线)`,
+                        structure
+                    };
+                }
             }
         }
     }
     
     // Short Logic: Trend DOWN -> Find Gold Cross -> Then Death Cross
     if (trendDirection === 'DOWN') {
-        const justCrossedDown = curr.ema15 < curr.ema60 && prev.ema15 >= prev.ema60;
-        
-        if (justCrossedDown) {
-            let foundGoldZone = false;
-            let highestInGoldZone = parseFloat(curr.h);
+        // Must be in Death structure currently to consider selling
+        if (currentGold) {
+             return { signal: false, action: 'HOLD', sl: 0, reason: "1H下跌，但3m当前处于金叉区域", structure };
+        }
+
+        for (let k = 0; k < LOOKBACK_WINDOW; k++) {
+            const idx = i - k;
+            if (idx < 1) break;
             
-            for (let x = i - 1; x >= 0; x--) {
-                const c = candles[x] as any;
-                if (c.ema15 > c.ema60) {
-                    foundGoldZone = true;
-                    const high = parseFloat(c.h);
-                    if (high > highestInGoldZone) highestInGoldZone = high;
-                } else {
-                    if (foundGoldZone) break;
+            const c = candles[idx] as any;
+            const p = candles[idx-1] as any;
+            
+            // Check for crossover at this candle: EMA15 crossed DOWN EMA60
+            const crossedDown = c.ema15 < c.ema60 && p.ema15 >= p.ema60;
+            
+            if (crossedDown) {
+                let foundGoldZone = false;
+                let highestInGoldZone = parseFloat(c.h);
+                
+                for (let x = idx - 1; x >= 0; x--) {
+                    const prevC = candles[x] as any;
+                    if (prevC.ema15 > prevC.ema60) {
+                        foundGoldZone = true;
+                        const high = parseFloat(prevC.h);
+                        if (high > highestInGoldZone) highestInGoldZone = high;
+                    } else {
+                        if (foundGoldZone) break;
+                    }
                 }
-            }
-            
-            if (foundGoldZone) {
-                return { 
-                    signal: true, 
-                    action: 'SELL', 
-                    sl: highestInGoldZone, 
-                    reason: "1H下跌 + 3m金叉后死叉",
-                    structure
-                };
+                
+                if (foundGoldZone) {
+                    return { 
+                        signal: true, 
+                        action: 'SELL', 
+                        sl: highestInGoldZone, 
+                        reason: `1H下跌 + 3m金叉后死叉 (信号延迟${k}根K线)`,
+                        structure
+                    };
+                }
             }
         }
     }
@@ -226,6 +257,7 @@ const analyzeCoin = async (
 
     const currentPrice = parseFloat(marketData.ticker?.last || "0");
     const totalEquity = parseFloat(accountData.balance.totalEq);
+    const availEquity = parseFloat(accountData.balance.availEq || "0"); // NEW: Get Available Equity
     
     // Strategy Analysis
     const trend1H = analyze1HTrend(marketData.candles1H);
@@ -369,6 +401,7 @@ ${posAnalysis}
 
 请基于上述计算结果生成 JSON 决策。
 `;
+
     try {
         const text = await callDeepSeek(apiKey, [
             { role: "system", content: systemPrompt },
@@ -419,12 +452,36 @@ ${posAnalysis}
         }
 
         // Calc precise size for "5%"
+        // FIXED LOGIC: Base size on Available Equity with Safety Buffer to prevent 51008 Errors
         if (finalAction === 'BUY' || finalAction === 'SELL') {
-            const amountU = totalEquity * 0.05;
-            const leverage = parseFloat(DEFAULT_LEVERAGE); 
-            const positionValue = amountU * leverage;
-            const contracts = positionValue / (CONTRACT_VAL * currentPrice);
-            decision.size = Math.max(contracts, 0.01).toFixed(2);
+            // Strategy desired amount: 5% of Total Equity
+            const strategyAmountU = totalEquity * 0.05;
+            
+            // Safety constraint: 95% of Available Equity (Leave 5% for fees/buffer)
+            // Note: If availEquity is very low (e.g. all in position), this effectively stops adding.
+            const maxAffordableU = availEquity * 0.95;
+
+            // Use the smaller of the two
+            const amountU = Math.min(strategyAmountU, maxAffordableU);
+
+            // If calculated amount is too small (e.g. < 1 USDT), it usually means we are out of funds.
+            // OKX min order size varies, often around 1-5 USDT or 0.01/0.1 contracts.
+            // If amountU is extremely small, we should cancel the action to avoid "Invalid Size" or "Insufficient Balance" noise.
+            if (amountU < 1) {
+                 decision.action = 'HOLD';
+                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (5U)]";
+                 decision.size = "0";
+            } else {
+                const leverage = parseFloat(DEFAULT_LEVERAGE); 
+                const positionValue = amountU * leverage;
+                const contracts = positionValue / (CONTRACT_VAL * currentPrice);
+                decision.size = Math.max(contracts, 0.01).toFixed(2);
+                
+                // Add note to reasoning if capped
+                if (maxAffordableU < strategyAmountU) {
+                     decision.reasoning += ` [资金管控: 因可用余额(${availEquity.toFixed(2)})限制，下单金额已从目标(${strategyAmountU.toFixed(2)})下调至(${amountU.toFixed(2)})]`;
+                }
+            }
         }
 
         return decision;
