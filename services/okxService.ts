@@ -354,18 +354,9 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     } catch (e) {
         throw new Error("无效数量: " + order.size);
     }
-    const sizeStr = sizeFloat.toFixed(2);
-
-    const bodyObj: any = {
-        instId: targetInstId,
-        tdMode: "isolated", 
-        side: side,
-        posSide: posSide, 
-        ordType: "market",
-        sz: sizeStr
-    };
+    const initialSizeStr = sizeFloat.toFixed(2);
     
-    // Attach TP/SL (attachAlgoOrds)
+    // Check TPs and SLs once to pass into recursive function
     const tpPrice = order.trading_decision?.profit_target;
     const slPrice = order.trading_decision?.stop_loss;
     const cleanPrice = (p: string | undefined) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0 ? p : null;
@@ -373,35 +364,79 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     const validTp = cleanPrice(tpPrice);
     const validSl = cleanPrice(slPrice);
 
-    if (validTp || validSl) {
-        const algoOrder: any = {};
-        if (validTp) {
-            algoOrder.tpTriggerPx = validTp;
-            algoOrder.tpOrdPx = '-1'; // Market close
-        }
-        if (validSl) {
-            algoOrder.slTriggerPx = validSl;
-            algoOrder.slOrdPx = '-1'; // Market close
-        }
-        bodyObj.attachAlgoOrds = [algoOrder];
-    }
-    
-    const requestBody = JSON.stringify(bodyObj);
-    const headers = getHeaders('POST', path, requestBody, config);
-    
-    const response = await fetch(BASE_URL + path, { method: 'POST', headers: headers, body: requestBody });
-    const json = await response.json();
+    // Recursive Order Placement for Automatic Retries on 51008
+    const placeOrderWithRetry = async (currentSz: string, retries: number): Promise<any> => {
+        const bodyObj: any = {
+            instId: targetInstId,
+            tdMode: "isolated", 
+            side: side,
+            posSide: posSide, 
+            ordType: "market",
+            sz: currentSz
+        };
 
-    if (json.code !== '0') {
-        let errorMsg = `Code ${json.code}: ${json.msg}`;
-        if (json.data) errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
-
-        if (json.code === '51008') {
-            errorMsg = "余额不足 (51008): 账户资金无法支付当前开仓保证金及手续费，系统将尝试降低仓位重试。";
+        if (validTp || validSl) {
+            const algoOrder: any = {};
+            if (validTp) {
+                algoOrder.tpTriggerPx = validTp;
+                algoOrder.tpOrdPx = '-1'; // Market close
+            }
+            if (validSl) {
+                algoOrder.slTriggerPx = validSl;
+                algoOrder.slOrdPx = '-1'; // Market close
+            }
+            bodyObj.attachAlgoOrds = [algoOrder];
         }
-        throw new Error(errorMsg);
-    }
-    return json;
+        
+        const requestBody = JSON.stringify(bodyObj);
+        const headers = getHeaders('POST', path, requestBody, config);
+        
+        const response = await fetch(BASE_URL + path, { method: 'POST', headers: headers, body: requestBody });
+        const json = await response.json();
+
+        // FIX: Extract the actual error code from data if the top-level code is '1'
+        // OKX V5 uses code '1' for "Operation failed" and puts details in data array
+        const actualCode = (json.code === '1' && json.data && json.data.length > 0 && json.data[0].sCode) 
+                            ? json.data[0].sCode 
+                            : json.code;
+
+        // Specific handling for Insufficient Balance (Code 51008)
+        if (actualCode === '51008' && retries > 0) {
+            console.warn(`[${targetInstId}] Balance Insufficient (51008). Reducing size by 20% and retrying... Current: ${currentSz}`);
+            // Reduce by 20%
+            const reduced = (parseFloat(currentSz) * 0.8).toFixed(2);
+            
+            // Check if reduced size is still valid (>= 0.01)
+            if (parseFloat(reduced) >= 0.01) {
+                return placeOrderWithRetry(reduced, retries - 1);
+            } else {
+                 console.warn("Reduced size too small, aborting retry.");
+            }
+        }
+
+        if (json.code !== '0') {
+            let errorMsg = `Code ${json.code}: ${json.msg}`;
+            
+            // Detailed error reporting
+            if (json.data && json.data.length > 0) {
+                 const d = json.data[0];
+                 // If sMsg exists, append it
+                 if (d.sMsg) errorMsg += ` (sMsg: ${d.sMsg})`;
+                 else if (d.sCode) errorMsg += ` (sCode: ${d.sCode})`;
+                 else errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
+            } else if (json.data) {
+                errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
+            }
+
+            if (actualCode === '51008') {
+                errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
+            }
+            throw new Error(errorMsg);
+        }
+        return json;
+    };
+
+    return await placeOrderWithRetry(initialSizeStr, 2); // Try up to 2 times (Initial + 2 retries = 3 attempts total approx)
 
   } catch (error: any) {
       console.error(`Trade execution failed for ${targetInstId}:`, error);
