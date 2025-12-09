@@ -174,6 +174,7 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
                     }
                 }
                 
+                // If we found a death zone, this signal is valid
                 if (foundDeathZone) {
                     return { 
                         signal: true, 
@@ -376,6 +377,7 @@ ${posAnalysis}
    - 必须在 1H 趋势方向上操作。
    - 看涨时: 等待 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。在金叉形成的 K 线收盘后买入。
    - 看跌时: 等待 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。在死叉形成的 K 线收盘后卖出。
+   - **执行指令**: 如果 "3m 信号" 显示 "TRIGGERED"，说明满足条件，**必须**输出 ACTION 为 BUY 或 SELL，不要因为"错过最佳点"而观望。只要信号触发，就是有效。
 3. **资金管理 (Rolling)**:
    - 首仓 5% 可用余额（Available Equity）。
    - 每盈利 5% 加仓 5%。
@@ -398,7 +400,7 @@ ${posAnalysis}
 2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
 3. **hot_events_overview** 字段：请仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
 4. **market_assessment** 字段：必须明确包含以下两行结论：
-   - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨、下跌还是震荡。
+   - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
    - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
 请基于上述计算结果生成 JSON 决策。
@@ -478,8 +480,9 @@ ${posAnalysis}
                 // e.g. 1.956 -> 1.95
                 let contracts = Math.floor((targetAmountU / marginPerContract) * 100) / 100;
 
-                // Enforce Minimum Size Rule
-                if (contracts < MIN_SZ) {
+                // Enforce Minimum Size Rule with floating point tolerance
+                // Using 1e-6 epsilon to handle 0.01 vs 0.009999999 cases
+                if (contracts < MIN_SZ - 1e-6) {
                     // Check if we can afford the minimum size with maxAffordableU
                     const minMarginNeeded = marginPerContract * MIN_SZ;
 
