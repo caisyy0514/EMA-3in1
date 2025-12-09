@@ -281,6 +281,7 @@ const analyzeCoin = async (
         const posSize = parseFloat(p.pos);
         const upl = parseFloat(p.upl);
         const isLong = p.posSide === 'long';
+        const entryPx = parseFloat(p.avgPx);
         
         posAnalysis = `${p.posSide.toUpperCase()} ${p.pos} 张, 浮盈: ${upl} U`;
 
@@ -298,50 +299,76 @@ const analyzeCoin = async (
             }
         }
         
-        // 3. Trailing SL Logic
+        // 3. Trailing SL Logic (Optimized)
         if (finalAction === "HOLD" || finalAction.includes("BUY") || finalAction.includes("SELL")) {
-            const recent3m = marketData.candles3m.slice(-5);
-            let newSL = parseFloat(p.slTriggerPx || "0");
-            let shouldUpdate = false;
-            
-            const entryPx = parseFloat(p.avgPx);
-            const FEE_BUFFER = 0.0012; 
-            
-            if (isLong) {
-                const breakEvenPrice = entryPx * (1 + FEE_BUFFER);
-                const lowestRecent = Math.min(...recent3m.map(c => parseFloat(c.l)));
-                let targetSL = lowestRecent - TICK_SIZE;
-                
-                if (currentPrice > breakEvenPrice) {
-                    targetSL = Math.max(targetSL, breakEvenPrice);
-                }
-                
-                if (targetSL > newSL && targetSL < currentPrice) {
-                    newSL = targetSL;
-                    shouldUpdate = true;
-                }
+            let currentSL = parseFloat(p.slTriggerPx || "0");
+            const FEE_BUFFER = 0.0015; // 0.15% Safety Margin for Fees/Slip
 
+            let newSL = currentSL;
+            let shouldUpdate = false;
+
+            // Calculate ROI (Return on Investment relative to Price change)
+            // Long: (Curr - Entry) / Entry
+            // Short: (Entry - Curr) / Entry
+            const roi = isLong 
+                ? (currentPrice - entryPx) / entryPx 
+                : (entryPx - currentPrice) / entryPx;
+
+            // Rule 1: Net Profit <= 0 (plus fee buffer) -> DO NOT ADJUST
+            // Avoid getting shaken out by noise when trade is not yet profitable.
+            if (roi <= FEE_BUFFER) {
+                // Do nothing, keep original SL
             } else {
-                const breakEvenPrice = entryPx * (1 - FEE_BUFFER);
-                const highestRecent = Math.max(...recent3m.map(c => parseFloat(c.h)));
-                let targetSL = highestRecent + TICK_SIZE;
+                // Rule 2: Profit > 0 -> Rhythmic Adjustment
                 
-                if (currentPrice < breakEvenPrice) {
-                    targetSL = Math.min(targetSL, breakEvenPrice);
-                }
+                // Determine Lookback Window based on Profit Magnitude
+                // Standard: 7 Candles (Give it room to breathe)
+                // High Profit (>2%): 3 Candles (Tighten to lock gains)
+                let windowSize = 7;
+                if (roi > 0.02) windowSize = 3;
+
+                const recentCandles = marketData.candles3m.slice(-windowSize);
                 
-                if ((newSL === 0 || targetSL < newSL) && targetSL > currentPrice) {
-                    newSL = targetSL;
-                    shouldUpdate = true;
+                if (isLong) {
+                    // LONG: Trail below recent Lows
+                    const lowestLow = Math.min(...recentCandles.map(c => parseFloat(c.l)));
+                    let proposedSL = lowestLow - TICK_SIZE;
+
+                    // Ensure at least BreakEven (Entry + Fees)
+                    const breakEven = entryPx * (1 + FEE_BUFFER);
+                    if (proposedSL < breakEven) proposedSL = breakEven;
+
+                    // Rule 3: Ratchet Mechanism (Only move UP)
+                    // Update if Proposed SL is higher than Current SL AND below Current Price
+                    if ((currentSL === 0 || proposedSL > currentSL) && proposedSL < currentPrice) {
+                        newSL = proposedSL;
+                        shouldUpdate = true;
+                    }
+
+                } else {
+                    // SHORT: Trail above recent Highs
+                    const highestHigh = Math.max(...recentCandles.map(c => parseFloat(c.h)));
+                    let proposedSL = highestHigh + TICK_SIZE;
+
+                    // Ensure at least BreakEven (Entry - Fees)
+                    const breakEven = entryPx * (1 - FEE_BUFFER);
+                    if (proposedSL > breakEven) proposedSL = breakEven;
+
+                    // Rule 3: Ratchet Mechanism (Only move DOWN)
+                    // Update if Proposed SL is lower than Current SL (or curr is 0) AND above Current Price
+                    if ((currentSL === 0 || proposedSL < currentSL) && proposedSL > currentPrice) {
+                        newSL = proposedSL;
+                        shouldUpdate = true;
+                    }
                 }
             }
-            
-            if (shouldUpdate && finalAction === "HOLD") {
-                finalAction = "UPDATE_TPSL";
-                finalSL = newSL.toFixed(2);
-            }
-            if (shouldUpdate && (finalAction === "BUY" || finalAction === "SELL")) {
-                finalSL = newSL.toFixed(2);
+
+            // Apply Update
+            if (shouldUpdate) {
+                if (finalAction === "HOLD") {
+                    finalAction = "UPDATE_TPSL";
+                }
+                finalSL = newSL.toFixed(config.tickSize < 0.01 ? 4 : 2); // Adjust precision based on tick
             }
         }
 
@@ -350,7 +377,7 @@ const analyzeCoin = async (
         if (entry3m.signal) {
             finalAction = entry3m.action;
             finalSize = "5%"; // Initial Size
-            finalSL = entry3m.sl.toFixed(2);
+            finalSL = entry3m.sl.toFixed(config.tickSize < 0.01 ? 4 : 2);
         }
     }
 
@@ -381,9 +408,12 @@ ${posAnalysis}
 3. **资金管理 (Rolling)**:
    - 首仓 5% 可用余额（Available Equity）。
    - 每盈利 5% 加仓 5%。
-4. **止损管理**:
-   - 初始止损: 入场前一波反向交叉的极值 (Long用死叉期最低价, Short用金叉期最高价)。
-   - 移动止损: 持仓状态下净利润 ≤0 时不调整止盈止损。持仓状态下净利润 ＞0 时，如连续两根 K 线为亏损（持多单收阴，持空单收阳）则调整止损，持多单情况下止损设置为前5根 3m K线最低点，持空单情况下止损设置为前5根 3m K线最高点。止损只能往利润更高的方向移动（持有多单向上移动，持有空单向下移动）。
+4. **止损管理 (智能移动)**:
+   - **保护期**: 净利润 ≤ 0 时，**严禁**向当前价格移动止损，给予波动空间，防止被噪音震出。
+   - **推进期**: 净利润 > 0 时，开启移动止损。
+     - 利润 < 2%：使用最近 **7根** 3m K线极值作为止损位（宽容模式）。
+     - 利润 > 2%：使用最近 **3根** 3m K线极值作为止损位（紧缩模式，锁定暴利）。
+   - **棘轮原则**: 止损位只能向更有利的方向移动（做多只能上移，做空只能下移），确保利润不回吐。
 5. **反转离场**:
    - 如果 1H 趋势反转 (与持仓方向相反)，立即平仓。
 
@@ -460,8 +490,9 @@ ${posAnalysis}
             // Strategy desired amount: 5% of Total Equity
             const strategyAmountU = totalEquity * 0.05;
             
-            // Safety constraint: 95% of Available Equity (Leave 5% for fees/buffer)
-            const maxAffordableU = availEquity * 0.95;
+            // Safety constraint: 90% of Available Equity (Leave 10% for fees/buffer/volatility)
+            // Increased safety margin to prevent 51008 errors especially on volatile assets like DOGE
+            const maxAffordableU = availEquity * 0.90;
 
             // Use the smaller of the two as the basis for calculation
             let targetAmountU = Math.min(strategyAmountU, maxAffordableU);
@@ -518,7 +549,7 @@ ${posAnalysis}
             market_assessment: "无法评估",
             hot_events_overview: "数据获取失败",
             coin_analysis: "N/A",
-            trading_decision: { action: 'hold', confidence: "0%", position_size: "0", leverage: "0", profit_target: "", stop_loss: "", invalidation_condition: "" },
+            trading_decision: { action: 'HOLD', confidence: "0%", position_size: "0", leverage: "0", profit_target: "", stop_loss: "", invalidation_condition: "" },
             reasoning: `系统错误: ${error.message}`,
             action: 'HOLD',
             size: "0",
@@ -527,26 +558,23 @@ ${posAnalysis}
     }
 }
 
-
-// --- Main Decision Function ---
-
+// --- Orchestrator ---
 export const getTradingDecision = async (
-  apiKey: string,
-  marketDataCollection: MarketDataCollection,
-  accountData: AccountContext
+    apiKey: string,
+    marketData: MarketDataCollection,
+    accountData: AccountContext
 ): Promise<AIDecision[]> => {
-  if (!apiKey) throw new Error("请输入 DeepSeek API Key");
+    // 1. Fetch News (Global Context)
+    const newsContext = await fetchRealTimeNews();
 
-  const newsContext = await fetchRealTimeNews();
-  const coins = Object.keys(COIN_CONFIG);
-  
-  // Parallel execution for all coins
-  const promises = coins.map(coin => {
-      const data = marketDataCollection[coin];
-      if (!data) return null; // Should not happen if data fetched correctly
-      return analyzeCoin(coin, apiKey, data, accountData, newsContext);
-  });
-  
-  const results = await Promise.all(promises);
-  return results.filter(d => d !== null) as AIDecision[];
+    // 2. Analyze Each Coin in Parallel
+    const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
+        // Check if we have data for this coin
+        if (!marketData[coinKey]) return null;
+        
+        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, newsContext);
+    });
+
+    const results = await Promise.all(promises);
+    return results.filter((r): r is AIDecision => r !== null);
 };
