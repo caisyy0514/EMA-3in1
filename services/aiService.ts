@@ -464,12 +464,12 @@ ${posAnalysis}
             // Use the smaller of the two
             const amountU = Math.min(strategyAmountU, maxAffordableU);
 
-            // If calculated amount is too small (e.g. < 1 USDT), it usually means we are out of funds.
-            // OKX min order size varies, often around 1-5 USDT or 0.01/0.1 contracts.
+            // If calculated amount is too small (e.g. < 0.1 USDT), it usually means we are out of funds.
+            // OKX min order size varies, often around 0.01-0.1 USDT or 0.01/0.1 contracts.
             // If amountU is extremely small, we should cancel the action to avoid "Invalid Size" or "Insufficient Balance" noise.
-            if (amountU < 1) {
+            if (amountU < 0.1) {
                  decision.action = 'HOLD';
-                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (1U)]";
+                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (0.1U)]";
                  decision.size = "0";
             } else {
                 const leverage = parseFloat(DEFAULT_LEVERAGE); 
