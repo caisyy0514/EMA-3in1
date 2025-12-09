@@ -1,22 +1,25 @@
 
-export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; tickSize: number; displayName: string }> = {
+export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; tickSize: number; displayName: string; minSz: number }> = {
   ETH: { 
     instId: "ETH-USDT-SWAP", 
     contractVal: 0.1, 
     tickSize: 0.01, 
-    displayName: "ETH" 
+    displayName: "ETH",
+    minSz: 0.01
   },
   SOL: { 
     instId: "SOL-USDT-SWAP", 
     contractVal: 1.0, 
     tickSize: 0.01, 
-    displayName: "SOL" 
+    displayName: "SOL",
+    minSz: 0.01
   },
   DOGE: { 
     instId: "DOGE-USDT-SWAP", 
-    contractVal: 10.0, // OKX Standard for Swap is often 10 or 100. Assuming 10 for safety, verify with exchange if needed.
+    contractVal: 10.0, 
     tickSize: 0.00001, 
-    displayName: "DOGE" 
+    displayName: "DOGE",
+    minSz: 0.01
   }
 };
 
