@@ -137,7 +137,7 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
     
     const currentGold = curr.ema15 > curr.ema60;
     const structure = currentGold ? "金叉多头区域" : "死叉空头区域";
-    const LOOKBACK_WINDOW = 3; // Scan last 3 candles for signal
+    const LOOKBACK_WINDOW = 5; // Scan last 5 candles for signal (approx 15 mins)
 
     // Long Logic: Trend UP -> Find Death Cross -> Then Gold Cross
     if (trendDirection === 'UP') {
@@ -179,7 +179,7 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
                         signal: true, 
                         action: 'BUY', 
                         sl: lowestInDeathZone, 
-                        reason: `1H上涨 + 3m死叉后金叉 (信号延迟${k}根K线)`,
+                        reason: `1H上涨 + 3m死叉后金叉 (处于有效入场窗口, 发生于${k}根K线前)`,
                         structure
                     };
                 }
@@ -224,7 +224,7 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
                         signal: true, 
                         action: 'SELL', 
                         sl: highestInGoldZone, 
-                        reason: `1H下跌 + 3m金叉后死叉 (信号延迟${k}根K线)`,
+                        reason: `1H下跌 + 3m金叉后死叉 (处于有效入场窗口, 发生于${k}根K线前)`,
                         structure
                     };
                 }
@@ -373,8 +373,8 @@ ${posAnalysis}
    - 只要EMA15 < EMA60 且 K线阴线即为DOWN
 2. **入场逻辑 (3m)**: 
    - 必须在 1H 趋势方向上操作。
-   - 看涨时: 等待 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。在金叉形成的 K 线收盘买入。
-   - 看跌时: 等待 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。在死叉形成的 K 线收盘卖出。
+   - 看涨时: 等待 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。在金叉形成的 K 线收盘后买入。
+   - 看跌时: 等待 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。在死叉形成的 K 线收盘后卖出。
 3. **资金管理 (Rolling)**:
    - 首仓 5% 可用余额（Available Equity）。
    - 每盈利 5% 加仓 5%。
@@ -396,12 +396,12 @@ ${posAnalysis}
 2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
 3. **hot_events_overview** 字段：请仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
 4. **market_assessment** 字段：必须明确包含以下两行结论：
-   - 【1H趋势】：明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨、下跌还是震荡。
-   - 【3m入场】：明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
+   - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨、下跌还是震荡。
+   - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
 请基于上述计算结果生成 JSON 决策。
 `;
-
+    
     try {
         const text = await callDeepSeek(apiKey, [
             { role: "system", content: systemPrompt },
@@ -469,7 +469,7 @@ ${posAnalysis}
             // If amountU is extremely small, we should cancel the action to avoid "Invalid Size" or "Insufficient Balance" noise.
             if (amountU < 1) {
                  decision.action = 'HOLD';
-                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (5U)]";
+                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (1U)]";
                  decision.size = "0";
             } else {
                 const leverage = parseFloat(DEFAULT_LEVERAGE); 
