@@ -254,6 +254,7 @@ const analyzeCoin = async (
     const TICK_SIZE = config.tickSize;
     const CONTRACT_VAL = config.contractVal;
     const INST_ID = config.instId;
+    const MIN_SZ = config.minSz || 0.01; // Default to 0.01 if not set
 
     const currentPrice = parseFloat(marketData.ticker?.last || "0");
     const totalEquity = parseFloat(accountData.balance.totalEq);
@@ -369,7 +370,7 @@ ${posAnalysis}
 
 **策略规则 (Strategy Rules)**:
 1.1H 趋势 (趋势判断): ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
-- 只要EMA15 > EMA60 且 K线阳线即为UP。
+   - 只要EMA15 > EMA60 且 K线阳线即为UP。
    - 只要EMA15 < EMA60 且 K线阴线即为DOWN
 2. **入场逻辑 (3m)**: 
    - 必须在 1H 趋势方向上操作。
@@ -391,6 +392,7 @@ ${posAnalysis}
 - 趋势反转立即平仓。
 - 如果有持仓 且 需要移动止损 -> UPDATE_TPSL (Set new SL).
 - 默认杠杆固定为 ${DEFAULT_LEVERAGE}x。
+
 **输出要求**:
 1. 返回格式必须为 JSON。
 2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
@@ -401,7 +403,7 @@ ${posAnalysis}
 
 请基于上述计算结果生成 JSON 决策。
 `;
-    
+
     try {
         const text = await callDeepSeek(apiKey, [
             { role: "system", content: systemPrompt },
@@ -452,34 +454,52 @@ ${posAnalysis}
         }
 
         // Calc precise size for "5%"
-        // FIXED LOGIC: Base size on Available Equity with Safety Buffer to prevent 51008 Errors
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             // Strategy desired amount: 5% of Total Equity
             const strategyAmountU = totalEquity * 0.05;
             
             // Safety constraint: 95% of Available Equity (Leave 5% for fees/buffer)
-            // Note: If availEquity is very low (e.g. all in position), this effectively stops adding.
             const maxAffordableU = availEquity * 0.95;
 
-            // Use the smaller of the two
-            const amountU = Math.min(strategyAmountU, maxAffordableU);
+            // Use the smaller of the two as the basis for calculation
+            let targetAmountU = Math.min(strategyAmountU, maxAffordableU);
 
-            // If calculated amount is too small (e.g. < 0.1 USDT), it usually means we are out of funds.
-            // OKX min order size varies, often around 0.01-0.1 USDT or 0.01/0.1 contracts.
-            // If amountU is extremely small, we should cancel the action to avoid "Invalid Size" or "Insufficient Balance" noise.
-            if (amountU < 0.1) {
+             // Minimum Margin Threshold Check (0.5 USDT)
+             if (targetAmountU < 0.5) {
                  decision.action = 'HOLD';
-                 decision.reasoning += " [资金不足: 可用余额低于安全下单阈值 (0.1U)]";
                  decision.size = "0";
+                 decision.reasoning += ` [资金不足: 可用余额低于安全下单阈值 (0.5U)]`;
             } else {
                 const leverage = parseFloat(DEFAULT_LEVERAGE); 
-                const positionValue = amountU * leverage;
-                const contracts = positionValue / (CONTRACT_VAL * currentPrice);
-                decision.size = Math.max(contracts, 0.01).toFixed(2);
+                // Cost per contract (Margin required) = (ContractVal * Price) / Leverage
+                const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
+
+                // Calculate contracts with 2 decimal precision (floor to avoid overspending)
+                // e.g. 1.956 -> 1.95
+                let contracts = Math.floor((targetAmountU / marginPerContract) * 100) / 100;
+
+                // Enforce Minimum Size Rule
+                if (contracts < MIN_SZ) {
+                    // Check if we can afford the minimum size with maxAffordableU
+                    const minMarginNeeded = marginPerContract * MIN_SZ;
+
+                    if (maxAffordableU >= minMarginNeeded) {
+                         contracts = MIN_SZ;
+                         decision.reasoning += ` [资金微调: 策略仓位(${ (targetAmountU/marginPerContract).toFixed(3) })小于最小限制(${MIN_SZ})，强制执行最小单位]`;
+                    } else {
+                         decision.action = 'HOLD';
+                         decision.size = "0";
+                         decision.reasoning += ` [资金不足: 余额(${availEquity.toFixed(2)})不足以支付最小${MIN_SZ}张合约保证金(${ minMarginNeeded.toFixed(2) })]`;
+                    }
+                }
                 
-                // Add note to reasoning if capped
-                if (maxAffordableU < strategyAmountU) {
-                     decision.reasoning += ` [资金管控: 因可用余额(${availEquity.toFixed(2)})限制，下单金额已从目标(${strategyAmountU.toFixed(2)})下调至(${amountU.toFixed(2)})]`;
+                if (decision.action !== 'HOLD') {
+                     // Pass formatted string (keep decimals for 0.01 steps)
+                     decision.size = contracts.toString(); 
+                     
+                     if (targetAmountU < strategyAmountU && contracts > MIN_SZ) {
+                          decision.reasoning += ` [资金管控: 因余额限制，仓位已调整]`;
+                     }
                 }
             }
         }
