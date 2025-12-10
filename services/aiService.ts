@@ -299,63 +299,87 @@ const analyzeCoin = async (
             }
         }
         
-        // 3. Trailing SL Logic (Optimized)
+        // 3. Trailing SL Logic (Structure Based - Interval Extremes)
         if (finalAction === "HOLD" || finalAction.includes("BUY") || finalAction.includes("SELL")) {
             let currentSL = parseFloat(p.slTriggerPx || "0");
-            const FEE_BUFFER = 0.0015; // 0.15% Safety Margin for Fees/Slip
-
             let newSL = currentSL;
             let shouldUpdate = false;
+            
+            // Use 3m candles for structure analysis
+            const candles = marketData.candles3m;
 
-            // Calculate ROI (Return on Investment relative to Price change)
-            // Long: (Curr - Entry) / Entry
-            // Short: (Entry - Curr) / Entry
-            const roi = isLong 
-                ? (currentPrice - entryPx) / entryPx 
-                : (entryPx - currentPrice) / entryPx;
-
-            // Rule 1: Net Profit <= 0 (plus fee buffer) -> DO NOT ADJUST
-            // Avoid getting shaken out by noise when trade is not yet profitable.
-            if (roi <= FEE_BUFFER) {
-                // Do nothing, keep original SL
-            } else {
-                // Rule 2: Profit > 0 -> Rhythmic Adjustment
+            if (isLong) {
+                // LONG Logic:
+                // Move SL UP if we find a *new* Death Cross interval (dip) whose lowest point is higher than current SL.
                 
-                // Determine Lookback Window based on Profit Magnitude
-                // Standard: 7 Candles (Give it room to breathe)
-                // High Profit (>2%): 3 Candles (Tighten to lock gains)
-                let windowSize = 7;
-                if (roi > 0.02) windowSize = 3;
-
-                const recentCandles = marketData.candles3m.slice(-windowSize);
+                let lowestInZone = Infinity;
+                let foundZone = false;
+                let inZone = false;
                 
-                if (isLong) {
-                    // LONG: Trail below recent Lows
-                    const lowestLow = Math.min(...recentCandles.map(c => parseFloat(c.l)));
-                    let proposedSL = lowestLow - TICK_SIZE;
-
-                    // Ensure at least BreakEven (Entry + Fees)
-                    const breakEven = entryPx * (1 + FEE_BUFFER);
-                    if (proposedSL < breakEven) proposedSL = breakEven;
-
-                    // Rule 3: Ratchet Mechanism (Only move UP)
-                    // Update if Proposed SL is higher than Current SL AND below Current Price
+                // Scan backwards from latest completed candle
+                for (let i = candles.length - 1; i >= 0; i--) {
+                    const c = candles[i] as any;
+                    if (!c.ema15 || !c.ema60) continue;
+                    
+                    const isDeath = c.ema15 < c.ema60;
+                    
+                    if (isDeath) {
+                        inZone = true;
+                        const l = parseFloat(c.l);
+                        if (l < lowestInZone) lowestInZone = l;
+                    } else {
+                        // We are in Gold (or neutral)
+                        if (inZone) {
+                            // We were in a Death Zone, now we are out (moving backwards).
+                            // This means we found the most recent completed Death Zone interval.
+                            foundZone = true;
+                            break; 
+                        }
+                    }
+                }
+                
+                if (foundZone && lowestInZone !== Infinity) {
+                    const proposedSL = lowestInZone - TICK_SIZE; // Use exact low minus 1 tick
+                    
+                    // Ratchet Rule: Only move SL UP.
+                    // If Proposed SL > Current SL, update.
                     if ((currentSL === 0 || proposedSL > currentSL) && proposedSL < currentPrice) {
                         newSL = proposedSL;
                         shouldUpdate = true;
                     }
+                }
 
-                } else {
-                    // SHORT: Trail above recent Highs
-                    const highestHigh = Math.max(...recentCandles.map(c => parseFloat(c.h)));
-                    let proposedSL = highestHigh + TICK_SIZE;
-
-                    // Ensure at least BreakEven (Entry - Fees)
-                    const breakEven = entryPx * (1 - FEE_BUFFER);
-                    if (proposedSL > breakEven) proposedSL = breakEven;
-
-                    // Rule 3: Ratchet Mechanism (Only move DOWN)
-                    // Update if Proposed SL is lower than Current SL (or curr is 0) AND above Current Price
+            } else {
+                // SHORT Logic:
+                // Move SL DOWN if we find a *new* Gold Cross interval (rally) whose highest point is lower than current SL.
+                
+                let highestInZone = -Infinity;
+                let foundZone = false;
+                let inZone = false;
+                
+                for (let i = candles.length - 1; i >= 0; i--) {
+                    const c = candles[i] as any;
+                    if (!c.ema15 || !c.ema60) continue;
+                    
+                    const isGold = c.ema15 > c.ema60;
+                    
+                    if (isGold) {
+                        inZone = true;
+                        const h = parseFloat(c.h);
+                        if (h > highestInZone) highestInZone = h;
+                    } else {
+                        if (inZone) {
+                            foundZone = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (foundZone && highestInZone !== -Infinity) {
+                    const proposedSL = highestInZone + TICK_SIZE; // Use exact high plus 1 tick
+                    
+                    // Ratchet Rule: Only move SL DOWN.
+                    // If Proposed SL < Current SL, update.
                     if ((currentSL === 0 || proposedSL < currentSL) && proposedSL > currentPrice) {
                         newSL = proposedSL;
                         shouldUpdate = true;
@@ -368,7 +392,7 @@ const analyzeCoin = async (
                 if (finalAction === "HOLD") {
                     finalAction = "UPDATE_TPSL";
                 }
-                finalSL = newSL.toFixed(config.tickSize < 0.01 ? 4 : 2); // Adjust precision based on tick
+                finalSL = newSL.toFixed(config.tickSize < 0.01 ? 4 : 2);
             }
         }
 
@@ -408,12 +432,14 @@ ${posAnalysis}
 3. **资金管理 (Rolling)**:
    - 首仓 5% 可用余额（Available Equity）。
    - 每盈利 5% 加仓 5%。
-4. **止损管理 (智能移动)**:
-   - **保护期**: 净利润 ≤ 0 时，**严禁**向当前价格移动止损，给予波动空间，防止被噪音震出。
-   - **推进期**: 净利润 > 0 时，开启移动止损。
-     - 利润 < 2%：使用最近 **7根** 3m K线极值作为止损位（宽容模式）。
-     - 利润 > 2%：使用最近 **3根** 3m K线极值作为止损位（紧缩模式，锁定暴利）。
-   - **棘轮原则**: 止损位只能向更有利的方向移动（做多只能上移，做空只能下移），确保利润不回吐。
+4. **止损管理 (智能移动 - 结构化)**:
+   - **核心原则**: 止损位仅根据市场结构（交叉区间极值）向有利方向移动，锁定利润。
+   - **做多持仓**:
+     - 初始止损：入场前[死叉区间]最低点。
+     - 移动规则：若出现**新**的[死叉区间]（价格回调导致EMA15<60），且该区间最低点 > 当前止损，则将止损**上移**至该新低点。否则保持不变。
+   - **做空持仓**:
+     - 初始止损：入场前[金叉区间]最高点。
+     - 移动规则：若出现**新**的[金叉区间]（价格反弹导致EMA15>60），且该区间最高点 < 当前止损，则将止损**下移**至该新高点。否则保持不变。
 5. **反转离场**:
    - 如果 1H 趋势反转 (与持仓方向相反)，立即平仓。
 
