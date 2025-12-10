@@ -1,4 +1,5 @@
 
+
 import { AIDecision, MarketDataCollection, AccountContext, CandleData, SingleMarketData } from "../types";
 import { COIN_CONFIG, TAKER_FEE_RATE, DEFAULT_LEVERAGE } from "../constants";
 
@@ -255,11 +256,11 @@ const analyzeCoin = async (
     const TICK_SIZE = config.tickSize;
     const CONTRACT_VAL = config.contractVal;
     const INST_ID = config.instId;
-    const MIN_SZ = config.minSz || 0.01; // Default to 0.01 if not set
+    const MIN_SZ = config.minSz || 1; 
 
     const currentPrice = parseFloat(marketData.ticker?.last || "0");
     const totalEquity = parseFloat(accountData.balance.totalEq);
-    const availEquity = parseFloat(accountData.balance.availEq || "0"); // NEW: Get Available Equity
+    const availEquity = parseFloat(accountData.balance.availEq || "0"); 
     
     // Strategy Analysis
     const trend1H = analyze1HTrend(marketData.candles1H);
@@ -533,13 +534,14 @@ ${posAnalysis}
                 // Cost per contract (Margin required) = (ContractVal * Price) / Leverage
                 const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
 
-                // Calculate contracts with 2 decimal precision (floor to avoid overspending)
-                // e.g. 1.956 -> 1.95
-                let contracts = Math.floor((targetAmountU / marginPerContract) * 100) / 100;
+                // Calculate contracts - Updated to allow fractions (0.01) based on MIN_SZ
+                let contracts = targetAmountU / marginPerContract;
+                
+                // Truncate to 2 decimal places to avoid float issues, supporting 0.01 precision
+                contracts = Math.floor(contracts * 100) / 100;
 
-                // Enforce Minimum Size Rule with floating point tolerance
-                // Using 1e-6 epsilon to handle 0.01 vs 0.009999999 cases
-                if (contracts < MIN_SZ - 1e-6) {
+                // Enforce Minimum Size Rule
+                if (contracts < MIN_SZ) {
                     // Check if we can afford the minimum size with maxAffordableU
                     const minMarginNeeded = marginPerContract * MIN_SZ;
 
@@ -554,7 +556,7 @@ ${posAnalysis}
                 }
                 
                 if (decision.action !== 'HOLD') {
-                     // Pass formatted string (keep decimals for 0.01 steps)
+                     // Pass formatted string (2 decimals max)
                      decision.size = contracts.toString(); 
                      
                      if (targetAmountU < strategyAmountU && contracts > MIN_SZ) {
