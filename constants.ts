@@ -31,7 +31,7 @@ export const CONTRACT_VAL_ETH = 0.1;
 export const TAKER_FEE_RATE = 0.0005; 
 
 // 全局默认杠杆
-export const DEFAULT_LEVERAGE = "5";
+export const DEFAULT_LEVERAGE = "20";
 
 export const DEFAULT_CONFIG = {
   okxApiKey: "",
