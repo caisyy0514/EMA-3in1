@@ -1,4 +1,5 @@
 
+
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext, SingleMarketData } from "../types";
 import { COIN_CONFIG, DEFAULT_LEVERAGE, MOCK_TICKER } from "../constants";
 import CryptoJS from 'crypto-js';
@@ -350,11 +351,17 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     let sizeFloat = 0;
     try {
         sizeFloat = parseFloat(order.size);
-        if (sizeFloat < 0.01) throw new Error("数量过小 (<0.01张)");
-    } catch (e) {
-        throw new Error("无效数量: " + order.size);
+        // Find config to check minSz
+        const coinKey = Object.keys(COIN_CONFIG).find(key => COIN_CONFIG[key].instId === targetInstId);
+        const minSz = coinKey ? COIN_CONFIG[coinKey].minSz : 0.01;
+        
+        if (sizeFloat < minSz) throw new Error(`数量过小 (<${minSz}张)`);
+    } catch (e: any) {
+        throw new Error("无效数量: " + order.size + " (" + e.message + ")");
     }
-    const initialSizeStr = sizeFloat.toFixed(2);
+    
+    // Use the string as provided by aiService (which should be formatted correctly, e.g., to 2 decimals)
+    const initialSizeStr = order.size;
     
     // Check TPs and SLs once to pass into recursive function
     const tpPrice = order.trading_decision?.profit_target;
@@ -395,7 +402,6 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         const json = await response.json();
 
         // FIX: Extract the actual error code from data if the top-level code is '1'
-        // OKX V5 uses code '1' for "Operation failed" and puts details in data array
         const actualCode = (json.code === '1' && json.data && json.data.length > 0 && json.data[0].sCode) 
                             ? json.data[0].sCode 
                             : json.code;
@@ -403,14 +409,23 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         // Specific handling for Insufficient Balance (Code 51008)
         if (actualCode === '51008' && retries > 0) {
             console.warn(`[${targetInstId}] Balance Insufficient (51008). Reducing size by 20% and retrying... Current: ${currentSz}`);
-            // Reduce by 20%
-            const reduced = (parseFloat(currentSz) * 0.8).toFixed(2);
             
-            // Check if reduced size is still valid (>= 0.01)
-            if (parseFloat(reduced) >= 0.01) {
-                return placeOrderWithRetry(reduced, retries - 1);
+            // Reduce by 20%, keeping 2 decimals precision for Swaps
+            const reducedVal = parseFloat(currentSz) * 0.8;
+            
+            // Get MinSz again
+            const coinKey = Object.keys(COIN_CONFIG).find(key => COIN_CONFIG[key].instId === targetInstId);
+            const minSz = coinKey ? COIN_CONFIG[coinKey].minSz : 0.01;
+            
+            // Ensure we don't go below minSz
+            const safeReduced = Math.max(reducedVal, minSz);
+            const reducedStr = safeReduced.toFixed(2); // Format to 2 decimals
+
+            // Check if reduced size is valid (>= minSz)
+            if (safeReduced >= minSz) {
+                return placeOrderWithRetry(reducedStr, retries - 1);
             } else {
-                 console.warn("Reduced size too small, aborting retry.");
+                 console.warn(`Reduced size ${safeReduced} too small (<${minSz}), aborting retry.`);
             }
         }
 
@@ -428,15 +443,18 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
                 errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             }
 
+            // Append attempted size for debugging
+            errorMsg += ` [Attempted Sz: ${currentSz}]`;
+
             if (actualCode === '51008') {
-                errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
+                errorMsg = `余额不足 (51008): 账户资金无法支付开仓保证金 (Attempted: ${currentSz}, Retry Failed).`;
             }
             throw new Error(errorMsg);
         }
         return json;
     };
 
-    return await placeOrderWithRetry(initialSizeStr, 2); // Try up to 2 times (Initial + 2 retries = 3 attempts total approx)
+    return await placeOrderWithRetry(initialSizeStr, 2); 
 
   } catch (error: any) {
       console.error(`Trade execution failed for ${targetInstId}:`, error);
