@@ -1,5 +1,4 @@
 
-
 import { AIDecision, MarketDataCollection, AccountContext, CandleData, SingleMarketData } from "../types";
 import { COIN_CONFIG, TAKER_FEE_RATE, DEFAULT_LEVERAGE } from "../constants";
 
@@ -256,11 +255,11 @@ const analyzeCoin = async (
     const TICK_SIZE = config.tickSize;
     const CONTRACT_VAL = config.contractVal;
     const INST_ID = config.instId;
-    const MIN_SZ = config.minSz || 1; 
+    const MIN_SZ = config.minSz || 0.01; // Default to 0.01 if not set
 
     const currentPrice = parseFloat(marketData.ticker?.last || "0");
     const totalEquity = parseFloat(accountData.balance.totalEq);
-    const availEquity = parseFloat(accountData.balance.availEq || "0"); 
+    const availEquity = parseFloat(accountData.balance.availEq || "0"); // NEW: Get Available Equity
     
     // Strategy Analysis
     const trend1H = analyze1HTrend(marketData.candles1H);
@@ -434,8 +433,8 @@ ${posAnalysis}
    - 首仓 5% 可用余额（Available Equity）。
    - 每盈利 5% 加仓 5%。
 4. **止损管理 (智能移动 - 结构化)**:
-   - **核心原则**: 止损位仅根据3m趋势的市场结构（交叉区间极值）向有利方向移动，锁定利润。
-   - **做多持仓**:
+   - **核心原则**: 止损位仅根据市场结构（交叉区间极值）向有利方向移动，锁定利润。
+ - **做多持仓**:
      - 初始止损：入场前3m趋势[死叉区间]最低点。
      - 移动规则：若3m趋势出现**新**的[死叉区间]（价格回调导致EMA15<60），且该区间最低点 > 当前止损，则将止损**上移**至该新低点。否则保持不变。
    - **做空持仓**:
@@ -507,9 +506,18 @@ ${posAnalysis}
             if(aiJson.trading_decision?.invalidation_condition) {
                  decision.trading_decision.invalidation_condition = aiJson.trading_decision.invalidation_condition;
             }
+            // Use AI action unless overridden later
+            if(aiJson.action) decision.action = aiJson.action;
 
         } catch (e) {
             console.warn(`[${coinKey}] AI Response JSON parse failed, using defaults.`);
+        }
+
+        // --- FIX 1: Enforce Rolling Logic ---
+        // If local logic triggered rolling (Profit > 5%), but AI (or default) set it to HOLD, force it back to BUY/SELL.
+        if (invalidationReason.includes("Rolling") && finalAction !== 'HOLD') {
+             decision.action = finalAction as any;
+             decision.reasoning = `[策略触发] 滚仓补单 (收益>5%). ` + decision.reasoning;
         }
 
         // Calc precise size for "5%"
@@ -534,14 +542,20 @@ ${posAnalysis}
                 // Cost per contract (Margin required) = (ContractVal * Price) / Leverage
                 const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
 
-                // Calculate contracts - Updated to allow fractions (0.01) based on MIN_SZ
-                let contracts = targetAmountU / marginPerContract;
-                
-                // Truncate to 2 decimal places to avoid float issues, supporting 0.01 precision
-                contracts = Math.floor(contracts * 100) / 100;
+                // Calculate contracts with 2 decimal precision (floor to avoid overspending)
+                // e.g. 1.956 -> 1.95
+                let contracts = Math.floor((targetAmountU / marginPerContract) * 100) / 100;
 
-                // Enforce Minimum Size Rule
-                if (contracts < MIN_SZ) {
+                // --- FIX 2: DOGE Specific Integer Handling ---
+                // DOGE often requires integer contract sizes. Fractional contracts (e.g. 2.19) can cause 51008 "Insufficient Balance" errors
+                // due to precision mismatches or dust handling on OKX side.
+                if (coinKey === 'DOGE') {
+                    contracts = Math.floor(contracts);
+                }
+
+                // Enforce Minimum Size Rule with floating point tolerance
+                // Using 1e-6 epsilon to handle 0.01 vs 0.009999999 cases
+                if (contracts < MIN_SZ - 1e-6) {
                     // Check if we can afford the minimum size with maxAffordableU
                     const minMarginNeeded = marginPerContract * MIN_SZ;
 
@@ -556,7 +570,7 @@ ${posAnalysis}
                 }
                 
                 if (decision.action !== 'HOLD') {
-                     // Pass formatted string (2 decimals max)
+                     // Pass formatted string (keep decimals for 0.01 steps)
                      decision.size = contracts.toString(); 
                      
                      if (targetAmountU < strategyAmountU && contracts > MIN_SZ) {
