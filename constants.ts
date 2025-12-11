@@ -20,7 +20,7 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
     contractVal: 10.0, 
     tickSize: 0.01, 
     displayName: "DOGE",
-    minSz: 0.01
+    minSz: 1.0
   }
 };
 
@@ -32,7 +32,7 @@ export const CONTRACT_VAL_ETH = 0.1;
 export const TAKER_FEE_RATE = 0.0005; 
 
 // 全局默认杠杆
-export const DEFAULT_LEVERAGE = "20";
+export const DEFAULT_LEVERAGE = "5";
 
 export const DEFAULT_CONFIG = {
   okxApiKey: "",
