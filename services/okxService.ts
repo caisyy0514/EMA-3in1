@@ -1,5 +1,4 @@
 
-
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext, SingleMarketData } from "../types";
 import { COIN_CONFIG, DEFAULT_LEVERAGE, MOCK_TICKER } from "../constants";
 import CryptoJS from 'crypto-js';
@@ -331,15 +330,57 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         throw new Error(`平仓失败 (多: ${longMsg}, 空: ${shortMsg})`);
     }
 
-    // --- BUY / SELL ---
-    
-    // 1. Determine Position Side
-    const posSide = order.action === 'BUY' ? 'long' : 'short';
-    const side = order.action === 'BUY' ? 'buy' : 'sell';
+    // --- BUY / SELL (OPEN OR PARTIAL CLOSE) ---
+
+    // 1. Fetch CURRENT Position Status to determine Side & ReduceOnly
+    // This fixes the issue where SELL on Long was treated as Open Short
+    let apiPosSide = '';
+    let apiSide = '';
+    let reduceOnly = false;
+
+    // Fetch position specifically for this instrument
+    const posPath = `/api/v5/account/positions?instId=${targetInstId}`;
+    const posHeaders = getHeaders('GET', posPath, '', config);
+    const posRes = await fetch(BASE_URL + posPath, { method: 'GET', headers: posHeaders });
+    const posJson = await posRes.json();
+    const currentPos = (posJson.data && posJson.data.length > 0) ? posJson.data[0] : null;
+
+    if (currentPos && parseFloat(currentPos.pos) > 0) {
+        // Position Exists
+        apiPosSide = currentPos.posSide; // Stick to existing position side
+        
+        if (currentPos.posSide === 'long') {
+            if (order.action === 'BUY') {
+                apiSide = 'buy'; // Add to Long
+                reduceOnly = false;
+            } else if (order.action === 'SELL') {
+                apiSide = 'sell'; // Close Long (Partial TP)
+                reduceOnly = true; // IMPORTANT: Prevent Reverse Open
+            }
+        } else if (currentPos.posSide === 'short') {
+            if (order.action === 'SELL') {
+                apiSide = 'sell'; // Add to Short
+                reduceOnly = false;
+            } else if (order.action === 'BUY') {
+                apiSide = 'buy'; // Close Short (Partial TP)
+                reduceOnly = true; // IMPORTANT: Prevent Reverse Open
+            }
+        }
+    } else {
+        // No Position - Standard Open
+        if (order.action === 'BUY') {
+            apiPosSide = 'long';
+            apiSide = 'buy';
+        } else if (order.action === 'SELL') {
+            apiPosSide = 'short';
+            apiSide = 'sell';
+        }
+        reduceOnly = false;
+    }
 
     // 2. Set Leverage First (Crucial for V5)
     try {
-        await setLeverage(targetInstId, order.leverage || DEFAULT_LEVERAGE, posSide, config);
+        await setLeverage(targetInstId, order.leverage || DEFAULT_LEVERAGE, apiPosSide, config);
     } catch (e: any) {
         throw new Error(`无法设置杠杆: ${e.message}`);
     }
@@ -351,17 +392,11 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     let sizeFloat = 0;
     try {
         sizeFloat = parseFloat(order.size);
-        // Find config to check minSz
-        const coinKey = Object.keys(COIN_CONFIG).find(key => COIN_CONFIG[key].instId === targetInstId);
-        const minSz = coinKey ? COIN_CONFIG[coinKey].minSz : 0.01;
-        
-        if (sizeFloat < minSz) throw new Error(`数量过小 (<${minSz}张)`);
-    } catch (e: any) {
-        throw new Error("无效数量: " + order.size + " (" + e.message + ")");
+        if (sizeFloat < 0.01) throw new Error("数量过小 (<0.01张)");
+    } catch (e) {
+        throw new Error("无效数量: " + order.size);
     }
-    
-    // Use the string as provided by aiService (which should be formatted correctly, e.g., to 2 decimals)
-    const initialSizeStr = order.size;
+    const initialSizeStr = sizeFloat.toFixed(2);
     
     // Check TPs and SLs once to pass into recursive function
     const tpPrice = order.trading_decision?.profit_target;
@@ -376,13 +411,16 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         const bodyObj: any = {
             instId: targetInstId,
             tdMode: "isolated", 
-            side: side,
-            posSide: posSide, 
+            side: apiSide,
+            posSide: apiPosSide, 
             ordType: "market",
-            sz: currentSz
+            sz: currentSz,
+            reduceOnly: reduceOnly
         };
 
-        if (validTp || validSl) {
+        if ((validTp || validSl) && !reduceOnly) {
+            // Only attach TP/SL if we are NOT purely closing (reduceOnly)
+            // OKX sometimes rejects attaching algos to reduceOnly orders depending on mode
             const algoOrder: any = {};
             if (validTp) {
                 algoOrder.tpTriggerPx = validTp;
@@ -402,6 +440,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         const json = await response.json();
 
         // FIX: Extract the actual error code from data if the top-level code is '1'
+        // OKX V5 uses code '1' for "Operation failed" and puts details in data array
         const actualCode = (json.code === '1' && json.data && json.data.length > 0 && json.data[0].sCode) 
                             ? json.data[0].sCode 
                             : json.code;
@@ -409,23 +448,14 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         // Specific handling for Insufficient Balance (Code 51008)
         if (actualCode === '51008' && retries > 0) {
             console.warn(`[${targetInstId}] Balance Insufficient (51008). Reducing size by 20% and retrying... Current: ${currentSz}`);
+            // Reduce by 20%
+            const reduced = (parseFloat(currentSz) * 0.8).toFixed(2);
             
-            // Reduce by 20%, keeping 2 decimals precision for Swaps
-            const reducedVal = parseFloat(currentSz) * 0.8;
-            
-            // Get MinSz again
-            const coinKey = Object.keys(COIN_CONFIG).find(key => COIN_CONFIG[key].instId === targetInstId);
-            const minSz = coinKey ? COIN_CONFIG[coinKey].minSz : 0.01;
-            
-            // Ensure we don't go below minSz
-            const safeReduced = Math.max(reducedVal, minSz);
-            const reducedStr = safeReduced.toFixed(2); // Format to 2 decimals
-
-            // Check if reduced size is valid (>= minSz)
-            if (safeReduced >= minSz) {
-                return placeOrderWithRetry(reducedStr, retries - 1);
+            // Check if reduced size is still valid (>= 0.01)
+            if (parseFloat(reduced) >= 0.01) {
+                return placeOrderWithRetry(reduced, retries - 1);
             } else {
-                 console.warn(`Reduced size ${safeReduced} too small (<${minSz}), aborting retry.`);
+                 console.warn("Reduced size too small, aborting retry.");
             }
         }
 
@@ -443,18 +473,15 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
                 errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             }
 
-            // Append attempted size for debugging
-            errorMsg += ` [Attempted Sz: ${currentSz}]`;
-
             if (actualCode === '51008') {
-                errorMsg = `余额不足 (51008): 账户资金无法支付开仓保证金 (Attempted: ${currentSz}, Retry Failed).`;
+                errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
             }
             throw new Error(errorMsg);
         }
         return json;
     };
 
-    return await placeOrderWithRetry(initialSizeStr, 2); 
+    return await placeOrderWithRetry(initialSizeStr, 2); // Try up to 2 times (Initial + 2 retries = 3 attempts total approx)
 
   } catch (error: any) {
       console.error(`Trade execution failed for ${targetInstId}:`, error);
