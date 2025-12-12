@@ -331,12 +331,13 @@ const analyzeCoin = async (
     // --- Prompt Construction ---
     const systemPrompt = `
 你是一个严格执行 **${coinKey} 趋势策略** 的交易机器人。
+**严禁** 使用任何其他指标（RSI, MACD, KDJ 等），只关注 EMA15 和 EMA60。
 当前时间: ${new Date().toLocaleString()}
 
 **策略规则**:
-1. **1H 趋势**: 
-   - 涨势: 价格 > EMA60 且 EMA15 > EMA60.
-   - 跌势: 价格 < EMA60 且 EMA15 < EMA60.
+1. **1H 趋势**:  ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
+   - 只要EMA15 > EMA60 且 K线阳线即为UP。
+   - 只要EMA15 < EMA60 且 K线阴线即为DOWN
 2. **3m 入场**:
    - 做多: 1H涨势下，3m图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。金叉K线收盘进场。
    - 做空: 1H跌势下，3m图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。死叉K线收盘进场。
