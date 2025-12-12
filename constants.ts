@@ -18,7 +18,7 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
   DOGE: { 
     instId: "DOGE-USDT-SWAP", 
     contractVal: 10.0, 
-    tickSize: 0.01, 
+    tickSize: 0.00001, 
     displayName: "DOGE",
     minSz: 1.0
   }
