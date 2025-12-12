@@ -75,7 +75,7 @@ const fetchRealTimeNews = async (): Promise<string> => {
     }
 };
 
-// --- Strategy Logic: EMA Trend Tracking ---
+// --- Strategy Logic: Strict EMA Trend Tracking ---
 
 function analyze1HTrend(candles: CandleData[]) {
     // Need enough data for EMA60 stability
@@ -90,146 +90,133 @@ function analyze1HTrend(candles: CandleData[]) {
 
     const ema15 = latest.ema15;
     const ema60 = latest.ema60;
+    const price = parseFloat(latest.c);
     
-    // Logic 1: EMA Relationship (Dominant Trend)
-    const isGold = ema15 > ema60;
-    const isDeath = ema15 < ema60;
+    // Rule 1: 1H Trend
+    // UP: Price > EMA60 AND EMA15 > EMA60
+    // DOWN: Price < EMA60 AND EMA15 < EMA60
     
-    // Logic 2: Candle Color (Strength Indicator)
-    const close = parseFloat(latest.c);
-    const open = parseFloat(latest.o);
-    const isYang = close > open; 
-    const isYin = close < open;
+    const isUp = price > ema60 && ema15 > ema60;
+    const isDown = price < ema60 && ema15 < ema60;
     
-    if (isGold) {
-        const strength = isYang ? "强势" : "回调中";
+    if (isUp) {
         return { 
             direction: 'UP', 
             timestamp: parseInt(latest.ts), 
-            description: `上涨 (${strength} / EMA金叉)`
+            description: `上涨 (价格>EMA60 & EMA15>EMA60)`
         };
     }
     
-    if (isDeath) {
-        const strength = isYin ? "强势" : "反弹中";
+    if (isDown) {
         return { 
             direction: 'DOWN', 
             timestamp: parseInt(latest.ts),
-            description: `下跌 (${strength} / EMA死叉)`
+            description: `下跌 (价格<EMA60 & EMA15<EMA60)`
         };
     }
     
-    return { direction: 'NEUTRAL', timestamp: parseInt(latest.ts), description: "均线粘合/震荡" };
+    return { direction: 'NEUTRAL', timestamp: parseInt(latest.ts), description: "震荡/均线纠缠" };
 }
 
 function analyze3mEntry(candles: CandleData[], trendDirection: string) {
     if (candles.length < 100) return { signal: false, action: 'HOLD', sl: 0, reason: "数据不足", structure: "未知" };
     
-    const i = candles.length - 1; // Latest completed candle
-    const curr = candles[i] as any;
+    // Check the LATEST CLOSED candle (index length-1) and the one before (length-2)
+    // to detect a FRESH CROSS.
+    const curr = candles[candles.length - 1] as any;
+    const prev = candles[candles.length - 2] as any;
     
-    if (!curr.ema15 || !curr.ema60) {
+    if (!curr.ema15 || !curr.ema60 || !prev.ema15 || !prev.ema60) {
          return { signal: false, action: 'HOLD', sl: 0, reason: "指标数据不足", structure: "未知" };
     }
     
     const currentGold = curr.ema15 > curr.ema60;
-    const structure = currentGold ? "金叉多头区域" : "死叉空头区域";
-    const LOOKBACK_WINDOW = 5; // Scan last 5 candles for signal (approx 15 mins)
+    const structure = currentGold ? "金叉区域" : "死叉区域";
 
-    // Long Logic: Trend UP -> Find Death Cross -> Then Gold Cross
+    // --- LONG ENTRY LOGIC ---
+    // 1. Trend UP
+    // 2. Fresh Gold Cross (Prev: Death, Curr: Gold)
+    // 3. Confirm Previous Death Zone existed (at least 1 candle)
     if (trendDirection === 'UP') {
-        if (!currentGold) {
-             return { signal: false, action: 'HOLD', sl: 0, reason: "1H上涨，但3m当前处于死叉区域", structure };
-        }
+        // Check for Fresh Gold Cross
+        const isFreshGoldCross = (prev.ema15 <= prev.ema60) && (curr.ema15 > curr.ema60);
+        
+        if (isFreshGoldCross) {
+            // Find Lowest Low of the PRIOR Death Zone
+            // Scan backwards from 'prev' until we find a Gold Cross again
+            let lowestInZone = parseFloat(prev.l); // Start with prev candle low
+            let foundStartOfDeathZone = false;
+            let lookbackLimit = 100; // Safety break
 
-        // Look back for the crossover event within the window
-        for (let k = 0; k < LOOKBACK_WINDOW; k++) {
-            const idx = i - k;
-            if (idx < 1) break;
-            
-            const c = candles[idx] as any;
-            const p = candles[idx-1] as any;
-            
-            // EMA15 crossed UP EMA60
-            const crossedUp = c.ema15 > c.ema60 && p.ema15 <= p.ema60;
-            
-            if (crossedUp) {
-                // Determine Initial SL: Lowest point of the PRIOR Death Interval
-                let lowestInPriorDeathZone = Infinity;
-                let foundDeathZone = false;
-                
-                // Scan backwards from the crossover point (idx-1)
-                for (let x = idx - 1; x >= 0; x--) {
-                    const prevC = candles[x] as any;
-                    if (prevC.ema15 < prevC.ema60) {
-                        foundDeathZone = true;
-                        const low = parseFloat(prevC.l);
-                        if (low < lowestInPriorDeathZone) lowestInPriorDeathZone = low;
-                    } else {
-                        // We found a Gold cross BEFORE the Death zone -> Death zone ended (going backwards)
-                        if (foundDeathZone) break;
-                    }
+            for (let i = candles.length - 2; i >= 0 && lookbackLimit > 0; i--) {
+                const c = candles[i] as any;
+                if (c.ema15 <= c.ema60) {
+                    // Still in Death Zone
+                    const l = parseFloat(c.l);
+                    if (l < lowestInZone) lowestInZone = l;
+                } else {
+                    // Found the Gold Cross BEFORE the Death Zone
+                    foundStartOfDeathZone = true;
+                    break;
                 }
-                
-                if (foundDeathZone && lowestInPriorDeathZone !== Infinity) {
-                    return { 
-                        signal: true, 
-                        action: 'BUY', 
-                        sl: lowestInPriorDeathZone, 
-                        reason: `1H上涨 + 3m死叉后金叉 (有效入场)`,
-                        structure
-                    };
-                }
+                lookbackLimit--;
+            }
+
+            if (foundStartOfDeathZone) {
+                return { 
+                    signal: true, 
+                    action: 'BUY', 
+                    sl: lowestInZone, 
+                    reason: `1H看涨 + 3m死叉转金叉 (死叉区间最低点止损)`,
+                    structure: "刚形成金叉"
+                };
             }
         }
+        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看涨，等待3m金叉信号", structure };
     }
     
-    // Short Logic: Trend DOWN -> Find Gold Cross -> Then Death Cross
+    // --- SHORT ENTRY LOGIC ---
+    // 1. Trend DOWN
+    // 2. Fresh Death Cross (Prev: Gold, Curr: Death)
+    // 3. Confirm Previous Gold Zone existed
     if (trendDirection === 'DOWN') {
-        if (currentGold) {
-             return { signal: false, action: 'HOLD', sl: 0, reason: "1H下跌，但3m当前处于金叉区域", structure };
-        }
+        // Check for Fresh Death Cross
+        const isFreshDeathCross = (prev.ema15 >= prev.ema60) && (curr.ema15 < curr.ema60);
+        
+        if (isFreshDeathCross) {
+            // Find Highest High of the PRIOR Gold Zone
+            let highestInZone = parseFloat(prev.h);
+            let foundStartOfGoldZone = false;
+            let lookbackLimit = 100;
 
-        for (let k = 0; k < LOOKBACK_WINDOW; k++) {
-            const idx = i - k;
-            if (idx < 1) break;
-            
-            const c = candles[idx] as any;
-            const p = candles[idx-1] as any;
-            
-            // EMA15 crossed DOWN EMA60
-            const crossedDown = c.ema15 < c.ema60 && p.ema15 >= p.ema60;
-            
-            if (crossedDown) {
-                // Determine Initial SL: Highest point of the PRIOR Gold Interval
-                let highestInPriorGoldZone = -Infinity;
-                let foundGoldZone = false;
-                
-                for (let x = idx - 1; x >= 0; x--) {
-                    const prevC = candles[x] as any;
-                    if (prevC.ema15 > prevC.ema60) {
-                        foundGoldZone = true;
-                        const high = parseFloat(prevC.h);
-                        if (high > highestInPriorGoldZone) highestInPriorGoldZone = high;
-                    } else {
-                        if (foundGoldZone) break;
-                    }
+            for (let i = candles.length - 2; i >= 0 && lookbackLimit > 0; i--) {
+                const c = candles[i] as any;
+                if (c.ema15 >= c.ema60) {
+                    // Still in Gold Zone
+                    const h = parseFloat(c.h);
+                    if (h > highestInZone) highestInZone = h;
+                } else {
+                    // Found the Death Cross BEFORE the Gold Zone
+                    foundStartOfGoldZone = true;
+                    break;
                 }
-                
-                if (foundGoldZone && highestInPriorGoldZone !== -Infinity) {
-                    return { 
-                        signal: true, 
-                        action: 'SELL', 
-                        sl: highestInPriorGoldZone, 
-                        reason: `1H下跌 + 3m金叉后死叉 (有效入场)`,
-                        structure
-                    };
-                }
+                lookbackLimit--;
+            }
+
+            if (foundStartOfGoldZone) {
+                return { 
+                    signal: true, 
+                    action: 'SELL', 
+                    sl: highestInZone, 
+                    reason: `1H看跌 + 3m金叉转死叉 (金叉区间最高点止损)`,
+                    structure: "刚形成死叉"
+                };
             }
         }
+        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看跌，等待3m死叉信号", structure };
     }
     
-    return { signal: false, action: 'HOLD', sl: 0, reason: "无有效交叉信号", structure };
+    return { signal: false, action: 'HOLD', sl: 0, reason: "1H趋势不明确或不满足入场", structure };
 }
 
 // --- Single Coin Analysis ---
@@ -265,6 +252,7 @@ const analyzeCoin = async (
     let finalAction = "HOLD";
     let finalSize = "0";
     let finalSL = "";
+    let finalTP = "";
     let invalidationReason = "";
     
     // --- Decision Logic ---
@@ -272,214 +260,52 @@ const analyzeCoin = async (
         const p = primaryPosition!;
         const posSize = parseFloat(p.pos);
         const avgEntry = parseFloat(p.avgPx);
-        const upl = parseFloat(p.upl);
+        // uplRatio: 0.05 = 5%
+        const uplRatio = parseFloat(p.uplRatio); 
         const isLong = p.posSide === 'long';
-        
-        // Calculate ROI based on Price vs Entry (More accurate than UPL ratio for logic)
-        // ROI = (Price - Entry) / Entry * Leverage (approx)
-        // Or simpler: ROI = (Price - Entry) / Entry for un-leveraged change
-        // Prompt asks for "Accumulated Profit" thresholds. UPL Ratio is usually suitable.
-        // Let's use UPL Ratio provided by API or recalculate for safety.
-        // uplRatio is usually "upl / margin".
-        
-        const uplRatio = parseFloat(p.uplRatio); // e.g. 0.05 = 5%
         
         posAnalysis = `${p.posSide.toUpperCase()} ${p.pos} 张, ROI: ${(uplRatio * 100).toFixed(2)}%`;
 
-        // === 1. PASSIVE TAKE PROFIT / INVALIDATION (Trend Reversal) ===
-        // If 1H Trend flips against position -> CLOSE ALL immediately
+        // === STOP LOSS CHECK (Hard SL is preferred, but logic check here) ===
+        // Note: Logic assumes OKX handles Algo Order SL. 
+        // We only actively close if 1H Trend Reverses completely.
+        
         let trendReversal = false;
         if (isLong && trend1H.direction === 'DOWN') trendReversal = true;
         if (!isLong && trend1H.direction === 'UP') trendReversal = true;
 
         if (trendReversal) {
             finalAction = "CLOSE";
-            invalidationReason = `[被动止盈] 1H趋势反转 (${trend1H.direction})`;
+            invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})`;
         }
 
-        // === 2. EMERGENCY TAKE PROFIT (Volatility) ===
-        // 3m Candle Volatility > 10%
-        if (finalAction === 'HOLD') {
-            const latest3m = marketData.candles3m[marketData.candles3m.length - 1];
-            const high = parseFloat(latest3m.h);
-            const low = parseFloat(latest3m.l);
-            const open = parseFloat(latest3m.o);
-            const volPct = (high - low) / open;
-            
-            if (volPct >= 0.10) {
-                finalAction = "CLOSE";
-                invalidationReason = `[紧急止盈] 3mK线极端波动 ${(volPct*100).toFixed(1)}%`;
-            }
-        }
-
-        // === 3. ACTIVE TAKE PROFIT (Layered) ===
-        // Only if trend is still valid
+        // === TAKE PROFIT LOGIC (Step-wise) ===
         if (finalAction === 'HOLD') {
             
-            // Level 3: Profit >= 15% -> CLOSE ALL
-            if (uplRatio >= 0.15) {
+            // TP2: 8% Profit -> Close All
+            if (uplRatio >= 0.08) {
                 finalAction = "CLOSE";
-                invalidationReason = `[主动止盈 L3] 收益达标 ${(uplRatio*100).toFixed(1)}% (>15%)`;
+                invalidationReason = `[止盈 TP2] 收益达标 ${(uplRatio*100).toFixed(2)}% (>=8%) -> 全部止盈`;
             }
-            // Level 2: Profit >= 10% -> CLOSE PARTIAL (Add 30%) + TIGHTEN SL
-            // To prevent infinite loop closing, we use a window [10%, 13%]
-            else if (uplRatio >= 0.10) {
-                 // Trigger Partial Close if we are in the activation window
-                 if (uplRatio < 0.13) {
-                     // Approximate logic: Sell ~30% of original. 
-                     // Assuming we already sold 50% at L1, we have 50% left. 30% of original is 60% of current.
-                     // Let's just sell 50% of current for simplicity and safety.
-                     finalAction = isLong ? "SELL" : "BUY"; // Reduce pos
-                     finalSize = (posSize * 0.5).toFixed(2); // Close half of current
-                     invalidationReason = `[主动止盈 L2] 收益 ${(uplRatio*100).toFixed(1)}% -> 减仓并收紧止损`;
-                 }
-                 
-                 // Regardless of closing, we MUST tighten SL to 50% Profit Level
-                 // 50% Profit Level = Entry + (Current - Entry) * 0.5
-                 const profitDiff = Math.abs(currentPrice - avgEntry);
-                 const halfProfitPrice = isLong 
-                    ? avgEntry + (profitDiff * 0.5)
-                    : avgEntry - (profitDiff * 0.5);
-                 
-                 // We will handle SL update in Step 4, overriding if better
-                 finalSL = halfProfitPrice.toFixed(config.tickSize < 0.01 ? 4 : 2);
-            }
-            // Level 1: Profit >= 5% -> CLOSE PARTIAL (50%)
-            // Window [5%, 8%]
+            // TP1: 5% Profit -> Close 50%
+            // Problem: How to know if we already triggered TP1?
+            // Heuristic: Check if current position size is close to "Initial Size".
+            // Initial Size is 10% of Equity.
+            // Current Value = posSize * contractVal * price / leverage? No, Position Value = posSize * contractVal * price.
+            // Let's use Margin. Initial Margin ~= Equity * 0.10.
+            // Current Margin ~= p.margin.
+            // If p.margin > (Equity * 0.10) * 0.8, we likely haven't sold half yet.
+            // (Using 0.8 as a buffer zone).
             else if (uplRatio >= 0.05) {
-                if (uplRatio < 0.08) {
+                const estimatedInitialMargin = totalEquity * 0.10;
+                const currentMargin = parseFloat(p.margin);
+                
+                // If current margin is > 70% of estimated initial margin, assume we haven't done TP1 yet.
+                // This prevents repetitive selling of the remaining half.
+                if (currentMargin > (estimatedInitialMargin * 0.7)) {
                     finalAction = isLong ? "SELL" : "BUY";
-                    finalSize = (posSize * 0.5).toFixed(2); // Close 50%
-                    invalidationReason = `[主动止盈 L1] 收益 ${(uplRatio*100).toFixed(1)}% -> 锁定半仓利润`;
-                }
-            }
-        }
-
-        // === 4. TRAILING STOP LOSS (Ratchet) ===
-        // Only if we are HOLDing or updating SL (not closing fully)
-        if (finalAction === "HOLD" || finalAction === "UPDATE_TPSL" || (finalAction !== "CLOSE" && invalidationReason.includes("止盈"))) {
-            let currentSL = parseFloat(p.slTriggerPx || "0");
-            let structuralSL = currentSL; // Default to keeping current
-            let shouldUpdate = false;
-            
-            const candles = marketData.candles3m;
-
-            if (isLong) {
-                // Rule: New Death Interval (EMA15 < 60) -> Lowest Point
-                // Scan for the *most recent completed* Death Interval
-                let lowestInZone = Infinity;
-                let foundZone = false;
-                let currentlyInDeath = candles[candles.length-1].ema15! < candles[candles.length-1].ema60!;
-                
-                // If currently in death, the interval is not complete, but the prompt says "appears new death interval".
-                // Usually ratchet SL implies waiting for the "Swing Low" which is confirmed when trend resumes (Gold cross).
-                // However, to be safe and responsive:
-                // We will look for the *last confirmed* swing low (Completed Death Zone).
-                
-                for (let i = candles.length - 2; i >= 0; i--) {
-                    const c = candles[i] as any;
-                    const prev = candles[i-1] as any; // safety check
-                    if (!prev) break;
-
-                    const isDeath = c.ema15 < c.ema60;
-                    
-                    if (isDeath) {
-                         // We are in a death zone
-                         const l = parseFloat(c.l);
-                         if (l < lowestInZone) lowestInZone = l;
-                         foundZone = true;
-                    } else {
-                        // We are in Gold zone
-                        if (foundZone) {
-                            // We just exited a death zone (moving backwards)
-                            // So we found the most recent COMPLETED death zone.
-                            break; 
-                        }
-                    }
-                }
-
-                if (foundZone && lowestInZone !== Infinity) {
-                    // Ratchet: Only move UP
-                    // Also check if we have a calculated TP SL (from Level 2 logic above)
-                    // We take the HIGHER of the two for Long (tighter stop)
-                    
-                    const proposedStructuralSL = lowestInZone - TICK_SIZE; 
-                    
-                    // Logic: Structural SL must be > Current SL to update
-                    if (currentSL === 0 || proposedStructuralSL > currentSL) {
-                        structuralSL = proposedStructuralSL;
-                        shouldUpdate = true;
-                    }
-                }
-                
-                // Merge with TP Level 2 SL (if set above)
-                if (finalSL) { // This holds the TP L2 SL calculated above
-                    const tpSL = parseFloat(finalSL);
-                    // Take the max (tightest)
-                    structuralSL = Math.max(structuralSL, tpSL);
-                    shouldUpdate = true;
-                }
-
-            } else { // Short
-                // Rule: New Gold Interval (EMA15 > 60) -> Highest Point
-                let highestInZone = -Infinity;
-                let foundZone = false;
-                
-                for (let i = candles.length - 2; i >= 0; i--) {
-                    const c = candles[i] as any;
-                    const prev = candles[i-1] as any;
-                    if (!prev) break;
-
-                    const isGold = c.ema15 > c.ema60;
-                    
-                    if (isGold) {
-                        const h = parseFloat(c.h);
-                        if (h > highestInZone) highestInZone = h;
-                        foundZone = true;
-                    } else {
-                        if (foundZone) break;
-                    }
-                }
-
-                if (foundZone && highestInZone !== -Infinity) {
-                    const proposedStructuralSL = highestInZone + TICK_SIZE;
-                    // Ratchet: Only move DOWN
-                    if (currentSL === 0 || proposedStructuralSL < currentSL) {
-                        structuralSL = proposedStructuralSL;
-                        shouldUpdate = true;
-                    }
-                }
-
-                // Merge with TP Level 2 SL
-                if (finalSL) {
-                    const tpSL = parseFloat(finalSL);
-                    // Take the min (tightest) for Short
-                    structuralSL = structuralSL === 0 ? tpSL : Math.min(structuralSL, tpSL);
-                    shouldUpdate = true;
-                }
-            }
-
-            // Execute Update
-            if (shouldUpdate) {
-                // If we are already doing a SELL (Partial TP), we need to handle SL update separately or via "UPDATE_TPSL"
-                // The current system handles ONE action per tick usually.
-                // Priority: SL Update > Partial TP?
-                // Prompt: "SL Priority > Adding/TP".
-                // If structural SL hit, we close. Here we are just updating the trigger.
-                
-                // If we have a Partial Close pending (finalAction = SELL/BUY), we might not be able to update SL in same tick easily via `executeOrder`.
-                // However, `updatePositionTPSL` is a separate call in server.ts.
-                // We will use UPDATE_TPSL if action is HOLD.
-                // If action is SELL (Partial), we assume the user prefers locking profit now. SL update can happen next tick.
-                
-                if (finalAction === "HOLD") {
-                    finalAction = "UPDATE_TPSL";
-                    finalSL = structuralSL.toFixed(config.tickSize < 0.01 ? 4 : 2);
-                } else {
-                    // We are partial closing. We can try to append info to reasoning so user knows SL should move next.
-                    // Or we prioritize the SL update?
-                    // "Partial Close" is putting money in pocket. "Updating SL" is future safety.
-                    // Let's stick to Partial Close if triggered, SL update will catch up in 3 seconds.
+                    finalSize = (posSize * 0.5).toFixed(2); // 50%
+                    invalidationReason = `[止盈 TP1] 收益达标 ${(uplRatio*100).toFixed(2)}% (>=5%) -> 平半仓`;
                 }
             }
         }
@@ -488,37 +314,41 @@ const analyzeCoin = async (
         // No Position: Check Entry
         if (entry3m.signal) {
             finalAction = entry3m.action;
-            finalSize = "5%"; // Initial Size
+            finalSize = "10%"; // New Rule: 10% of Total Account
             finalSL = entry3m.sl.toFixed(config.tickSize < 0.01 ? 4 : 2);
+            
+            // Pre-calculate TP prices for display/logging? 
+            // The bot uses active monitoring for TPs based on %, but we can set hard TPs if needed.
+            // Prompt says: "Pre-set two TP orders".
+            // Since OKX API usually attaches ONE TP, complex split TPs need active management or OCO.
+            // Our system supports active monitoring (see above).
+            // We will stick to Active TP monitoring in `executeOrder` or `analyzeCoin` loop 
+            // because `executeOrder` only attaches one TP algo.
+            // We will let the bot loop handle the 5% and 8% triggers.
         }
     }
 
     // --- Prompt Construction ---
     const systemPrompt = `
-你是一个严格执行 **${coinKey} EMA 趋势追踪策略** 的交易机器人。
-v**严禁** 使用任何其他指标（RSI, MACD, KDJ 等），只关注 EMA15 和 EMA60。
+你是一个严格执行 **${coinKey} 趋势策略** 的交易机器人。
 当前时间: ${new Date().toLocaleString()}
 
-**市场状态**:
-- 1H 趋势: ${trend1H.direction} (${trend1H.description})
-- 3m 结构: ${entry3m.structure}
-- 3m 信号: ${entry3m.signal ? "TRIGGERED" : "WAITING"} (${entry3m.reason})
+**策略规则**:
+1. **1H 趋势**: 
+   - 涨势: 价格 > EMA60 且 EMA15 > EMA60.
+   - 跌势: 价格 < EMA60 且 EMA15 < EMA60.
+2. **3m 入场**:
+   - 做多: 1H涨势下，3m图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。金叉K线收盘进场。
+   - 做空: 1H跌势下，3m图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。死叉K线收盘进场。
+3. **资金**: 10% 权益。
+4. **止损**: 3m 趋势下前一个反向交叉区间的极值（多单找死叉区间最低，空单找金叉区间最高）。
+5. **止盈**: 5%收益平半仓，8%收益清仓。
 
-**持仓状态**:
-${posAnalysis}
-
-**策略指令**:
-1. **入场**: -必须在 1H 趋势方向上操作。看涨时: 等待 3m 图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。在金叉形成的 K 线收盘后买入。跌时: 等待 3m 图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。在死叉形成的 K 线收盘后卖出。
-2. **止损 (棘轮)**: 
-   - 始终使用硬止损 (Algo Order)。
-   - 多单: 仅上移。目标 = 3m趋势下最新完成的死叉区间最低点。
-   - 空单: 仅下移。目标 = 3m趋势下最新完成的金叉区间最高点。
-3. **止盈 (分层)**:
-   - 收益 > 5%: 平仓 50%。
-   - 收益 > 10%: 再平仓 30%，并将止损移至盈利 50% 处。
-   - 收益 > 15%: 全部平仓。
-   - 1H 趋势反转: 立即全部平仓。
-4. **资金**: 首仓 5% 权益。
+**当前状态**:
+- 1H: ${trend1H.description}
+- 3m: ${entry3m.structure}
+- 信号: ${entry3m.signal ? "触发开仓" : entry3m.reason}
+- 持仓: ${posAnalysis}
 
 **输出要求**:
 1. 返回格式必须为 JSON。
@@ -528,7 +358,7 @@ ${posAnalysis}
    - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
    - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
 
-请基于上述计算结果生成 JSON 决策。
+请基于上述逻辑生成JSON决策。
 `;
 
     try {
@@ -543,7 +373,7 @@ ${posAnalysis}
         let decision: AIDecision = {
             coin: coinKey,
             instId: INST_ID,
-            stage_analysis: "EMA趋势追踪 (Pro)",
+            stage_analysis: "EMA严格趋势策略",
             market_assessment: `【1H趋势】：${tDirection}\n【3m入场】：${tEntry}`,
             hot_events_overview: "正在分析热点...",
             coin_analysis: `趋势: ${tDirection}。状态: ${posAnalysis}`,
@@ -552,7 +382,7 @@ ${posAnalysis}
                 confidence: "100%", 
                 position_size: finalSize,
                 leverage: DEFAULT_LEVERAGE, 
-                profit_target: "",
+                profit_target: finalTP,
                 stop_loss: finalSL,
                 invalidation_condition: invalidationReason || "Trend Reversal"
             },
@@ -566,40 +396,40 @@ ${posAnalysis}
             const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiJson = JSON.parse(cleanText);
             
-            // Merge AI reasoning text but TRUST LOCAL CALCULATED ACTION for safety
             if(aiJson.market_assessment) decision.market_assessment = aiJson.market_assessment;
             if(aiJson.hot_events_overview) decision.hot_events_overview = aiJson.hot_events_overview;
             if(aiJson.coin_analysis) decision.coin_analysis = aiJson.coin_analysis;
-            // We append AI reasoning to local reasoning
             if(aiJson.reasoning) decision.reasoning = `${decision.reasoning} | AI视角: ${aiJson.reasoning}`;
 
         } catch (e) {
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (Fixing SOL < 0.01 and DOGE 51008) ---
+        // --- SIZE CALCULATION (Preserving DOGE/SOL fixes) ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
-            
-            // Check if this is a "Partial Close" (Size is already specific string like "15.5")
-            // Or an "Entry" (Size is "5%")
             
             let contracts = 0;
 
             if (finalSize.includes('%')) {
-                // Initial Entry: 5% of Equity
-                const strategyAmountU = totalEquity * 0.05;
+                // New Rule: 10% of Equity
+                const pct = parseFloat(finalSize) / 100; // 0.10 or 0.50 (for partial close)
                 
-                // Safety: 85% of Available (Reduced from 90% to fix DOGE 51008 "Insufficient Balance")
-                // Provide more buffer for fees and volatility
+                // If it's an Entry (not partial close), base on Total Equity
+                // If it's Partial Close (SELL/BUY to reduce), logic above calculated "50% of POS". 
+                // Wait, finalSize logic above:
+                // Entry: "10%" -> Strategy Amount = Equity * 0.10
+                // Partial: "15.5" (Already number) -> processed in else block.
+                
+                const strategyAmountU = totalEquity * pct;
+                
+                // Safety: 85% of Available (Buffer)
                 const maxAffordableU = availEquity * 0.85; 
 
                 const targetAmountU = Math.min(strategyAmountU, maxAffordableU);
                 
                 const leverage = parseFloat(DEFAULT_LEVERAGE); 
-                // Margin needed per contract = (Val * Price) / Lev
                 const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
                 
-                // Raw Contracts
                 let rawContracts = targetAmountU / marginPerContract;
                 
                 // --- FIX for DOGE (Integer Only) ---
@@ -611,10 +441,8 @@ ${posAnalysis}
                 }
 
                 // --- FIX for SOL (Small Size < 0.01) ---
-                // If calculated size is too small but we have money, force MIN_SZ
                 if (contracts < MIN_SZ) {
                     const costForMin = marginPerContract * MIN_SZ;
-                    // Check against maxAffordable (using the 85% buffer)
                     if (maxAffordableU >= costForMin) {
                         contracts = MIN_SZ;
                         decision.reasoning += ` [保底交易] 资金计算量不足${MIN_SZ}张，强制执行最小单位`;
@@ -626,16 +454,15 @@ ${posAnalysis}
                     }
                 }
             } else {
-                // Partial Close (Size is already a number string from logic above)
+                // Partial Close (Size is already a number string like "15.5")
                 contracts = parseFloat(finalSize);
-                // Apply integer fix for DOGE here too just in case
                 if (config.minSz >= 1) contracts = Math.floor(contracts);
             }
 
             if (contracts > 0 && decision.action !== 'HOLD') {
                 decision.size = contracts.toString();
             } else if (decision.action !== 'HOLD') {
-                decision.action = 'HOLD'; // Fail-safe
+                decision.action = 'HOLD'; 
             }
         }
 
@@ -665,10 +492,8 @@ export const getTradingDecision = async (
     marketData: MarketDataCollection,
     accountData: AccountContext
 ): Promise<AIDecision[]> => {
-    // 1. Fetch News (Global Context)
     const newsContext = await fetchRealTimeNews();
 
-    // 2. Analyze Each Coin in Parallel
     const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
         if (!marketData[coinKey]) return null;
         return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, newsContext);
