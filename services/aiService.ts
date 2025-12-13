@@ -285,11 +285,30 @@ const analyzeCoin = async (
         const p = primaryPosition!;
         const posSize = parseFloat(p.pos);
         const avgEntry = parseFloat(p.avgPx);
-        // uplRatio: 0.05 = 5%
-        const uplRatio = parseFloat(p.uplRatio); 
         const isLong = p.posSide === 'long';
+
+        // === PROFIT CALCULATION OPTIMIZATION (NET PnL) ===
+        // Definition: Net Profit = Upl - (Open Fee + Close Fee)
+        // Fee = Value * Rate. Value = PosSize * ContractVal * Price
         
-        posAnalysis = `${p.posSide.toUpperCase()} ${p.pos} 张, ROI: ${(uplRatio * 100).toFixed(2)}%`;
+        const sizeCoins = posSize * CONTRACT_VAL;
+        
+        // 1. Calculate Estimated Fees (Double Side: Open + Close)
+        // Note: Using current price for close fee estimation
+        const openValUsd = sizeCoins * avgEntry;
+        const closeValUsd = sizeCoins * currentPrice;
+        const estTotalFee = (openValUsd + closeValUsd) * TAKER_FEE_RATE;
+
+        // 2. Net PnL
+        const rawUpl = parseFloat(p.upl);
+        const netPnl = rawUpl - estTotalFee;
+
+        // 3. Net ROI (Return on Margin)
+        const margin = parseFloat(p.margin);
+        // Safety check for div by zero
+        const netRoi = margin > 0 ? (netPnl / margin) : 0;
+        
+        posAnalysis = `${p.posSide.toUpperCase()} ${p.pos} 张, 净ROI: ${(netRoi * 100).toFixed(2)}% (净利: ${netPnl.toFixed(2)}U)`;
 
         // === STOP LOSS CHECK (Hard SL is preferred, but logic check here) ===
         // Note: Logic assumes OKX handles Algo Order SL. 
@@ -304,16 +323,16 @@ const analyzeCoin = async (
             invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})`;
         }
 
-        // === TAKE PROFIT LOGIC (Step-wise) ===
+        // === TAKE PROFIT LOGIC (Step-wise based on NET ROI) ===
         if (finalAction === 'HOLD') {
             
-            // TP2: 8% Profit -> Close All
-            if (uplRatio >= 0.08) {
+            // TP2: 8% NET Profit -> Close All
+            if (netRoi >= 0.08) {
                 finalAction = "CLOSE";
-                invalidationReason = `[止盈 TP2] 收益达标 ${(uplRatio*100).toFixed(2)}% (>=8%) -> 全部止盈`;
+                invalidationReason = `[止盈 TP2] 净收益达标 ${(netRoi*100).toFixed(2)}% (>=8%) -> 全部止盈`;
             }
-            // TP1: 5% Profit -> Close 50%
-            else if (uplRatio >= 0.05) {
+            // TP1: 5% NET Profit -> Close 50%
+            else if (netRoi >= 0.05) {
                 const estimatedInitialMargin = totalEquity * 0.10;
                 const currentMargin = parseFloat(p.margin);
                 
@@ -322,7 +341,7 @@ const analyzeCoin = async (
                 if (currentMargin > (estimatedInitialMargin * 0.7)) {
                     finalAction = isLong ? "SELL" : "BUY";
                     finalSize = (posSize * 0.5).toFixed(2); // 50%
-                    invalidationReason = `[止盈 TP1] 收益达标 ${(uplRatio*100).toFixed(2)}% (>=5%) -> 平半仓`;
+                    invalidationReason = `[止盈 TP1] 净收益达标 ${(netRoi*100).toFixed(2)}% (>=5%) -> 平半仓`;
                 }
             }
         }
@@ -374,6 +393,10 @@ const analyzeCoin = async (
 **严禁** 使用任何其他指标（RSI, MACD, KDJ 等），只关注 EMA15 和 EMA60。
 当前时间: ${new Date().toLocaleString()}
 
+**核心原则**:
+1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。保本是第一要务。
+2. **无限利润放大**: 在确保净利润为正的前提下，尽可能让利润奔跑。
+
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
    - 只要EMA15 > EMA60 且 K线阳线即为UP。
@@ -384,7 +407,7 @@ const analyzeCoin = async (
    - **执行指令**: 如果 "3m 信号" 显示 "TRIGGERED"，说明满足条件，**必须**输出 ACTION 为 BUY 或 SELL，不要因为"错过最佳点"而观望。只要信号触发，就是有效。
 3. **资金**: 10% 权益。
 4. **止损**: 3m 趋势下前一个反向交叉区间的极值（多单找死叉区间最低，空单找金叉区间最高）。
-5. **止盈**: 5%收益平半仓，8%收益清仓，下订单时直接随订单设置好。
+5. **止盈**: 净利润达5%平半仓，净利润达8%清仓。
 
 **当前状态**:
 - 1H: ${trend1H.description}
