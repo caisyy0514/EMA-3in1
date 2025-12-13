@@ -121,99 +121,124 @@ function analyze1HTrend(candles: CandleData[]) {
 function analyze3mEntry(candles: CandleData[], trendDirection: string) {
     if (candles.length < 100) return { signal: false, action: 'HOLD', sl: 0, reason: "数据不足", structure: "未知" };
     
-    // Check the LATEST CLOSED candle (index length-1) and the one before (length-2)
-    // to detect a FRESH CROSS.
     const curr = candles[candles.length - 1] as any;
-    const prev = candles[candles.length - 2] as any;
     
-    if (!curr.ema15 || !curr.ema60 || !prev.ema15 || !prev.ema60) {
+    if (!curr.ema15 || !curr.ema60) {
          return { signal: false, action: 'HOLD', sl: 0, reason: "指标数据不足", structure: "未知" };
     }
     
     const currentGold = curr.ema15 > curr.ema60;
     const structure = currentGold ? "金叉区域" : "死叉区域";
+    
+    // Tolerance: Allow entry if the cross happened within the last 5 candles (approx 24 mins)
+    // Adjusted from strict "fresh cross" to "recent cross" to fix missed entries
+    const TOLERANCE_CANDLES = 5; 
 
     // --- LONG ENTRY LOGIC ---
-    // 1. Trend UP
-    // 2. Fresh Gold Cross (Prev: Death, Curr: Gold)
-    // 3. Confirm Previous Death Zone existed (at least 1 candle)
     if (trendDirection === 'UP') {
-        // Check for Fresh Gold Cross
-        const isFreshGoldCross = (prev.ema15 <= prev.ema60) && (curr.ema15 > curr.ema60);
-        
-        if (isFreshGoldCross) {
-            // Find Lowest Low of the PRIOR Death Zone
-            // Scan backwards from 'prev' until we find a Gold Cross again
-            let lowestInZone = parseFloat(prev.l); // Start with prev candle low
-            let foundStartOfDeathZone = false;
-            let lookbackLimit = 100; // Safety break
-
-            for (let i = candles.length - 2; i >= 0 && lookbackLimit > 0; i--) {
+        // Condition: Currently in Gold Cross Zone
+        if (currentGold) {
+            // 1. Find the start of this Gold Zone (The Crossover Point)
+            let crossIndex = -1;
+            // Scan backwards
+            for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
-                if (c.ema15 <= c.ema60) {
-                    // Still in Death Zone
-                    const l = parseFloat(c.l);
-                    if (l < lowestInZone) lowestInZone = l;
-                } else {
-                    // Found the Gold Cross BEFORE the Death Zone
-                    foundStartOfDeathZone = true;
+                const p = candles[i-1] as any;
+                // Detect transition: Previous was <= (Death), Current is > (Gold)
+                if (p.ema15 <= p.ema60 && c.ema15 > c.ema60) {
+                    crossIndex = i;
                     break;
                 }
-                lookbackLimit--;
+                // Safety break if we go back too far without finding start (e.g. massive trend)
+                // If we exceed tolerance + buffer, we can stop, as signal won't be valid anyway
+                if ((candles.length - 1) - i > TOLERANCE_CANDLES + 2) break; 
             }
 
-            if (foundStartOfDeathZone) {
-                return { 
-                    signal: true, 
-                    action: 'BUY', 
-                    sl: lowestInZone, 
-                    reason: `1H看涨 + 3m死叉转金叉 (死叉区间最低点止损)`,
-                    structure: "刚形成金叉"
-                };
+            // 2. Evaluate if Cross is within Tolerance
+            if (crossIndex !== -1) {
+                const candlesSinceCross = (candles.length - 1) - crossIndex;
+                
+                if (candlesSinceCross <= TOLERANCE_CANDLES) {
+                    // 3. Calculate SL (Lowest of Previous Death Zone)
+                    let lowestInZone = parseFloat(candles[crossIndex - 1].l);
+                    let foundStartOfDeathZone = false;
+                    let lookbackLimit = 150; 
+
+                    for (let i = crossIndex - 1; i >= 0 && lookbackLimit > 0; i--) {
+                        const c = candles[i] as any;
+                        if (c.ema15 <= c.ema60) {
+                            // In previous Death Zone
+                            const l = parseFloat(c.l);
+                            if (l < lowestInZone) lowestInZone = l;
+                        } else {
+                            // Zone ended
+                            foundStartOfDeathZone = true;
+                            break;
+                        }
+                        lookbackLimit--;
+                    }
+
+                    return { 
+                        signal: true, 
+                        action: 'BUY', 
+                        sl: lowestInZone, 
+                        reason: `1H看涨 + 3m金叉 (发生于${candlesSinceCross}根K线前, 容错范围内)`,
+                        structure: "金叉持稳"
+                    };
+                }
             }
         }
-        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看涨，等待3m金叉信号", structure };
+        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看涨，3m处于金叉但已过入场窗口或处于死叉", structure };
     }
     
     // --- SHORT ENTRY LOGIC ---
-    // 1. Trend DOWN
-    // 2. Fresh Death Cross (Prev: Gold, Curr: Death)
-    // 3. Confirm Previous Gold Zone existed
     if (trendDirection === 'DOWN') {
-        // Check for Fresh Death Cross
-        const isFreshDeathCross = (prev.ema15 >= prev.ema60) && (curr.ema15 < curr.ema60);
-        
-        if (isFreshDeathCross) {
-            // Find Highest High of the PRIOR Gold Zone
-            let highestInZone = parseFloat(prev.h);
-            let foundStartOfGoldZone = false;
-            let lookbackLimit = 100;
-
-            for (let i = candles.length - 2; i >= 0 && lookbackLimit > 0; i--) {
+        // Condition: Currently in Death Cross Zone
+        if (!currentGold) {
+             // 1. Find start of Death Zone
+             let crossIndex = -1;
+             for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
-                if (c.ema15 >= c.ema60) {
-                    // Still in Gold Zone
-                    const h = parseFloat(c.h);
-                    if (h > highestInZone) highestInZone = h;
-                } else {
-                    // Found the Death Cross BEFORE the Gold Zone
-                    foundStartOfGoldZone = true;
+                const p = candles[i-1] as any;
+                // Transition: Previous was >= (Gold), Current is < (Death)
+                if (p.ema15 >= p.ema60 && c.ema15 < c.ema60) {
+                    crossIndex = i;
                     break;
                 }
-                lookbackLimit--;
-            }
+                if ((candles.length - 1) - i > TOLERANCE_CANDLES + 2) break;
+             }
 
-            if (foundStartOfGoldZone) {
-                return { 
-                    signal: true, 
-                    action: 'SELL', 
-                    sl: highestInZone, 
-                    reason: `1H看跌 + 3m金叉转死叉 (金叉区间最高点止损)`,
-                    structure: "刚形成死叉"
-                };
-            }
+             // 2. Evaluate Tolerance
+             if (crossIndex !== -1) {
+                 const candlesSinceCross = (candles.length - 1) - crossIndex;
+                 
+                 if (candlesSinceCross <= TOLERANCE_CANDLES) {
+                     // 3. Calculate SL (Highest of Previous Gold Zone)
+                     let highestInZone = parseFloat(candles[crossIndex - 1].h);
+                     let lookbackLimit = 150;
+
+                     for (let i = crossIndex - 1; i >= 0 && lookbackLimit > 0; i--) {
+                         const c = candles[i] as any;
+                         if (c.ema15 >= c.ema60) {
+                             const h = parseFloat(c.h);
+                             if (h > highestInZone) highestInZone = h;
+                         } else {
+                             break;
+                         }
+                         lookbackLimit--;
+                     }
+
+                     return { 
+                        signal: true, 
+                        action: 'SELL', 
+                        sl: highestInZone, 
+                        reason: `1H看跌 + 3m死叉 (发生于${candlesSinceCross}根K线前, 容错范围内)`,
+                        structure: "死叉持稳"
+                    };
+                 }
+             }
         }
-        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看跌，等待3m死叉信号", structure };
+        return { signal: false, action: 'HOLD', sl: 0, reason: "1H看跌，3m处于死叉但已过入场窗口或处于金叉", structure };
     }
     
     return { signal: false, action: 'HOLD', sl: 0, reason: "1H趋势不明确或不满足入场", structure };
@@ -288,14 +313,6 @@ const analyzeCoin = async (
                 invalidationReason = `[止盈 TP2] 收益达标 ${(uplRatio*100).toFixed(2)}% (>=8%) -> 全部止盈`;
             }
             // TP1: 5% Profit -> Close 50%
-            // Problem: How to know if we already triggered TP1?
-            // Heuristic: Check if current position size is close to "Initial Size".
-            // Initial Size is 10% of Equity.
-            // Current Value = posSize * contractVal * price / leverage? No, Position Value = posSize * contractVal * price.
-            // Let's use Margin. Initial Margin ~= Equity * 0.10.
-            // Current Margin ~= p.margin.
-            // If p.margin > (Equity * 0.10) * 0.8, we likely haven't sold half yet.
-            // (Using 0.8 as a buffer zone).
             else if (uplRatio >= 0.05) {
                 const estimatedInitialMargin = totalEquity * 0.10;
                 const currentMargin = parseFloat(p.margin);
@@ -314,17 +331,40 @@ const analyzeCoin = async (
         // No Position: Check Entry
         if (entry3m.signal) {
             finalAction = entry3m.action;
-            finalSize = "10%"; // New Rule: 10% of Total Account
-            finalSL = entry3m.sl.toFixed(config.tickSize < 0.01 ? 4 : 2);
+            finalSize = "10%"; // Rule: 10% of Total Account
             
-            // Pre-calculate TP prices for display/logging? 
-            // The bot uses active monitoring for TPs based on %, but we can set hard TPs if needed.
-            // Prompt says: "Pre-set two TP orders".
-            // Since OKX API usually attaches ONE TP, complex split TPs need active management or OCO.
-            // Our system supports active monitoring (see above).
-            // We will stick to Active TP monitoring in `executeOrder` or `analyzeCoin` loop 
-            // because `executeOrder` only attaches one TP algo.
-            // We will let the bot loop handle the 5% and 8% triggers.
+            // --- DOGE FIX: PRECISION & SAFETY BUFFER ---
+            // Determine precision for formatting SL price
+            // Default logic: tickSize < 0.01 ? 4 : 2
+            // DOGE logic: Enforce 5 decimals because tickSize is 0.00001
+            let decimals = config.tickSize < 0.01 ? 4 : 2;
+            if (coinKey === 'DOGE') decimals = 5;
+
+            finalSL = entry3m.sl.toFixed(decimals);
+            
+            // DOGE Specific Validation: Ensure SL is valid relative to Current Price
+            // "Your SL price should be higher than the primary order price" (Short) or lower (Long).
+            if (coinKey === 'DOGE') {
+                const slVal = parseFloat(finalSL);
+                // 0.5% Buffer to ensure validity in volatile/tight conditions
+                const buffer = currentPrice * 0.005;
+
+                if (finalAction === 'SELL') {
+                    // Short Entry: SL must be > Current Price
+                    if (slVal <= currentPrice) {
+                        const adjustedSL = currentPrice + buffer;
+                        finalSL = adjustedSL.toFixed(decimals);
+                        invalidationReason += " [DOGE修正: SL<=市价,已上调]";
+                    }
+                } else if (finalAction === 'BUY') {
+                    // Long Entry: SL must be < Current Price
+                    if (slVal >= currentPrice) {
+                        const adjustedSL = currentPrice - buffer;
+                        finalSL = adjustedSL.toFixed(decimals);
+                        invalidationReason += " [DOGE修正: SL>=市价,已下调]";
+                    }
+                }
+            }
         }
     }
 
@@ -415,12 +455,6 @@ const analyzeCoin = async (
             if (finalSize.includes('%')) {
                 // New Rule: 10% of Equity
                 const pct = parseFloat(finalSize) / 100; // 0.10 or 0.50 (for partial close)
-                
-                // If it's an Entry (not partial close), base on Total Equity
-                // If it's Partial Close (SELL/BUY to reduce), logic above calculated "50% of POS". 
-                // Wait, finalSize logic above:
-                // Entry: "10%" -> Strategy Amount = Equity * 0.10
-                // Partial: "15.5" (Already number) -> processed in else block.
                 
                 const strategyAmountU = totalEquity * pct;
                 
