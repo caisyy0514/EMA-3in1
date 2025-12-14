@@ -201,7 +201,7 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-2">
-             {/* 恢复可用余额显示 */}
+             {/* 顶部状态栏显示可用余额 */}
              <div className="hidden md:flex items-center gap-4 mr-6 text-xs font-mono text-okx-subtext bg-okx-bg/30 px-3 py-1.5 rounded-lg border border-okx-border/50">
                 <div className="flex items-center gap-2">
                    <Wallet size={14} className="text-gray-400"/>
@@ -276,8 +276,10 @@ const App: React.FC = () => {
               </div>
               <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1.5 custom-scrollbar bg-[#0c0c0e]">
                 {logs.slice().reverse().map((log) => (
-                  <div key={log.id} className="flex gap-2 border-b border-white/5 last:border-0 pb-1 mb-1">
-                    <span className={`font-bold ${
+                  <div key={log.id} className="flex gap-2 border-b border-white/5 last:border-0 pb-1 mb-1 items-start">
+                    {/* Added timestamp to logs */}
+                    <span className="text-gray-600 shrink-0">[{new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}]</span>
+                    <span className={`font-bold shrink-0 ${
                       log.type === 'ERROR' ? 'text-okx-down' :
                       log.type === 'SUCCESS' ? 'text-okx-up' :
                       'text-gray-400'
@@ -311,7 +313,8 @@ const App: React.FC = () => {
                           <Activity size={16} className="text-purple-500" /> {activeCoin} 决策
                       </h2>
                   </div>
-                  <div className="p-4 bg-[#121214]">
+                  {/* Increased padding-bottom (pb-6) for slightly more height visual */}
+                  <div className="p-4 pb-6 bg-[#121214]">
                       {currentDecision ? (
                           <div className="space-y-4">
                               <div className="flex items-center justify-between">
@@ -328,7 +331,7 @@ const App: React.FC = () => {
                                   </div>
                               </div>
                               
-                              {/* 新增: 决策详情参数展示 (TP/SL) */}
+                              {/* TP/SL Parameters Grid - Ensures height is increased naturally */}
                               <div className="grid grid-cols-2 gap-2 text-xs">
                                 <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50">
                                     <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><ShieldCheck size={10}/> 止损 (SL)</div>
