@@ -352,38 +352,11 @@ const analyzeCoin = async (
             finalAction = entry3m.action;
             finalSize = "10%"; // Rule: 10% of Total Account
             
-            // --- DOGE FIX: PRECISION & SAFETY BUFFER ---
             // Determine precision for formatting SL price
             // Default logic: tickSize < 0.01 ? 4 : 2
-            // DOGE logic: Enforce 5 decimals because tickSize is 0.00001
             let decimals = config.tickSize < 0.01 ? 4 : 2;
-            if (coinKey === 'DOGE') decimals = 5;
 
             finalSL = entry3m.sl.toFixed(decimals);
-            
-            // DOGE Specific Validation: Ensure SL is valid relative to Current Price
-            // "Your SL price should be higher than the primary order price" (Short) or lower (Long).
-            if (coinKey === 'DOGE') {
-                const slVal = parseFloat(finalSL);
-                // 0.5% Buffer to ensure validity in volatile/tight conditions
-                const buffer = currentPrice * 0.005;
-
-                if (finalAction === 'SELL') {
-                    // Short Entry: SL must be > Current Price
-                    if (slVal <= currentPrice) {
-                        const adjustedSL = currentPrice + buffer;
-                        finalSL = adjustedSL.toFixed(decimals);
-                        invalidationReason += " [DOGE修正: SL<=市价,已上调]";
-                    }
-                } else if (finalAction === 'BUY') {
-                    // Long Entry: SL must be < Current Price
-                    if (slVal >= currentPrice) {
-                        const adjustedSL = currentPrice - buffer;
-                        finalSL = adjustedSL.toFixed(decimals);
-                        invalidationReason += " [DOGE修正: SL>=市价,已下调]";
-                    }
-                }
-            }
         }
     }
 
@@ -470,7 +443,7 @@ const analyzeCoin = async (
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (Preserving DOGE/SOL fixes) ---
+        // --- SIZE CALCULATION (Preserving Integer Only logic) ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
@@ -491,7 +464,7 @@ const analyzeCoin = async (
                 
                 let rawContracts = targetAmountU / marginPerContract;
                 
-                // --- FIX for DOGE (Integer Only) ---
+                // --- FIX for Integer Only Contracts (XRP/DOGE/Etc where minSz >= 1) ---
                 if (config.minSz >= 1) {
                     contracts = Math.floor(rawContracts);
                 } else {
@@ -499,7 +472,7 @@ const analyzeCoin = async (
                     contracts = Math.floor(rawContracts * 100) / 100;
                 }
 
-                // --- FIX for SOL (Small Size < 0.01) ---
+                // --- FIX for Small Size < Min ---
                 if (contracts < MIN_SZ) {
                     const costForMin = marginPerContract * MIN_SZ;
                     if (maxAffordableU >= costForMin) {
