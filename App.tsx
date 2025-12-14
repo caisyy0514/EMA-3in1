@@ -201,10 +201,15 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-2">
-             <div className="hidden md:flex items-center gap-6 mr-6 text-xs font-mono text-okx-subtext bg-okx-bg/30 px-3 py-1.5 rounded-lg border border-okx-border/50">
+             {/* 恢复可用余额显示 */}
+             <div className="hidden md:flex items-center gap-4 mr-6 text-xs font-mono text-okx-subtext bg-okx-bg/30 px-3 py-1.5 rounded-lg border border-okx-border/50">
                 <div className="flex items-center gap-2">
                    <Wallet size={14} className="text-gray-400"/>
                    权益: <span className="text-white font-bold">{accountData?.balance.totalEq || '0.00'}</span>
+                </div>
+                <div className="w-px h-3 bg-gray-700"></div>
+                <div className="flex items-center gap-2">
+                   可用: <span className="text-okx-primary font-bold">{accountData?.balance.availEq || '0.00'}</span>
                 </div>
              </div>
 
@@ -322,6 +327,19 @@ const App: React.FC = () => {
                                       <div className="text-purple-400 font-bold font-mono">{currentDecision.trading_decision?.confidence}</div>
                                   </div>
                               </div>
+                              
+                              {/* 新增: 决策详情参数展示 (TP/SL) */}
+                              <div className="grid grid-cols-2 gap-2 text-xs">
+                                <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><ShieldCheck size={10}/> 止损 (SL)</div>
+                                    <div className="font-mono text-white tracking-wider">{currentDecision.trading_decision?.stop_loss || '--'}</div>
+                                </div>
+                                <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><Crosshair size={10}/> 止盈 (TP)</div>
+                                    <div className="font-mono text-white tracking-wider">{currentDecision.trading_decision?.profit_target || '--'}</div>
+                                </div>
+                              </div>
+
                               <button 
                                 onClick={() => setIsFullReportOpen(true)}
                                 className="w-full py-2 bg-gray-800 text-xs text-okx-subtext rounded border border-gray-700 hover:text-white transition-colors"
