@@ -1,10 +1,24 @@
 
 export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; tickSize: number; displayName: string; minSz: number }> = {
+  BTC: {
+    instId: "BTC-USDT-SWAP",
+    contractVal: 0.01,
+    tickSize: 0.1,
+    displayName: "BTC",
+    minSz: 0.01
+  },
   ETH: { 
     instId: "ETH-USDT-SWAP", 
     contractVal: 0.1, 
     tickSize: 0.01, 
     displayName: "ETH",
+    minSz: 0.01
+  },
+  BNB: {
+    instId: "BNB-USDT-SWAP",
+    contractVal: 0.1, // OKX Standard for BNB
+    tickSize: 0.01,
+    displayName: "BNB",
     minSz: 0.01
   },
   SOL: { 
@@ -19,6 +33,13 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
     contractVal: 100.0, 
     tickSize: 0.0001, 
     displayName: "XRP",
+    minSz: 0.01
+  },
+  OKB: {
+    instId: "OKB-USDT-SWAP",
+    contractVal: 1.0,
+    tickSize: 0.01,
+    displayName: "OKB",
     minSz: 0.01
   }
 };
