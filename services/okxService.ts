@@ -599,8 +599,8 @@ function generateMockMarketData(): MarketDataCollection {
   Object.keys(COIN_CONFIG).forEach(coin => {
       const config = COIN_CONFIG[coin];
       // Mock different prices
-      // Update logic to support XRP price around 2.5
-      const basePrice = coin === 'ETH' ? 3250 : coin === 'SOL' ? 145 : (coin === 'XRP' ? 2.50 : 0.35);
+      // Update logic to support XRP price around 2.5, BTC around 65000, BNB around 600, OKB around 50
+      const basePrice = coin === 'BTC' ? 65000 : coin === 'ETH' ? 3250 : coin === 'BNB' ? 600 : coin === 'SOL' ? 145 : coin === 'OKB' ? 50 : (coin === 'XRP' ? 2.50 : 0.35);
       const currentPrice = basePrice + Math.sin(now / 10000) * (basePrice * 0.01);
       
       const generateCandles = (count: number, intervalMs: number) => {
