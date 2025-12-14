@@ -5,7 +5,7 @@ import SettingsModal from './components/SettingsModal';
 import HistoryModal from './components/HistoryModal';
 import DecisionReport from './components/DecisionReport';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig, PositionData } from './types';
-import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X, Coins } from 'lucide-react';
+import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X, Coins, Zap } from 'lucide-react';
 import { DEFAULT_CONFIG, COIN_CONFIG, TAKER_FEE_RATE } from './constants';
 
 const App: React.FC = () => {
@@ -315,7 +315,16 @@ const App: React.FC = () => {
                   </div>
                   {/* Increased padding-bottom (pb-6) for slightly more height visual */}
                   <div className="p-4 pb-6 bg-[#121214]">
-                      {currentDecision ? (
+                      {currentDecision ? (() => {
+                          const coinConf = COIN_CONFIG[activeCoin];
+                          const price = parseFloat(currentCoinData?.ticker?.last || '0');
+                          const lev = parseFloat(currentDecision.leverage || '20');
+                          const sz = parseFloat(currentDecision.size || '0');
+                          // Calculate estimated value and margin
+                          const val = sz * (coinConf?.contractVal || 0) * price;
+                          const margin = lev > 0 ? val / lev : 0;
+
+                          return (
                           <div className="space-y-4">
                               <div className="flex items-center justify-between">
                                   <span className={`px-4 py-1.5 rounded text-sm font-bold ${
@@ -331,15 +340,42 @@ const App: React.FC = () => {
                                   </div>
                               </div>
                               
-                              {/* TP/SL Parameters Grid - Ensures height is increased naturally */}
+                              {/* Extended Parameters Grid */}
                               <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50">
-                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><ShieldCheck size={10}/> 止损 (SL)</div>
-                                    <div className="font-mono text-white tracking-wider">{currentDecision.trading_decision?.stop_loss || '--'}</div>
+                                {/* Size */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><Layers size={10}/> 数量 (Size)</div>
+                                    <div className="font-mono text-white tracking-wider flex items-baseline gap-1">
+                                        {sz} 张 
+                                        {val > 0 && <span className="text-[9px] text-gray-500">({val.toFixed(0)}U)</span>}
+                                    </div>
                                 </div>
-                                <div className="bg-gray-800/50 p-2 rounded border border-gray-700/50 text-right">
+                                {/* Leverage */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><Zap size={10}/> 杠杆 (Lev)</div>
+                                    <div className="font-mono text-white tracking-wider">{lev}x</div>
+                                </div>
+                                
+                                {/* Margin */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><DollarSign size={10}/> 保证金 (Est)</div>
+                                    <div className="font-mono text-yellow-500 tracking-wider">{margin.toFixed(2)} U</div>
+                                </div>
+                                {/* Price */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><TrendingUp size={10}/> 市价 (Price)</div>
+                                    <div className="font-mono text-blue-400 tracking-wider">{price.toFixed(2)}</div>
+                                </div>
+
+                                {/* SL */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><ShieldCheck size={10}/> 止损 (SL)</div>
+                                    <div className="font-mono text-orange-400 tracking-wider">{currentDecision.trading_decision?.stop_loss || '--'}</div>
+                                </div>
+                                {/* TP */}
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
                                     <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><Crosshair size={10}/> 止盈 (TP)</div>
-                                    <div className="font-mono text-white tracking-wider">{currentDecision.trading_decision?.profit_target || '--'}</div>
+                                    <div className="font-mono text-green-400 tracking-wider">{currentDecision.trading_decision?.profit_target || '--'}</div>
                                 </div>
                               </div>
 
@@ -350,7 +386,7 @@ const App: React.FC = () => {
                                   <ExternalLink size={12} className="inline mr-1" /> 查看报告
                               </button>
                           </div>
-                      ) : (
+                      )})() : (
                           <div className="py-6 text-center text-xs text-okx-subtext">连接中...</div>
                       )}
                   </div>
