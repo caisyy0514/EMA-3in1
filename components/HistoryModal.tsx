@@ -139,7 +139,9 @@ const HistoryModal: React.FC<Props> = ({ isOpen, onClose }) => {
                                 <div className="text-okx-primary font-bold">{selectedDecision.trading_decision?.confidence}</div>
                             </div>
                         </div>
-                        <DecisionReport decision={selectedDecision} />
+                        <div className="flex-1 overflow-y-auto custom-scrollbar z-10 relative">
+                           <DecisionReport decision={selectedDecision} />
+                        </div>
                     </>
                 ) : (
                     <div className="flex items-center justify-center h-full text-okx-subtext">
