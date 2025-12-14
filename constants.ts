@@ -1,5 +1,4 @@
 
-
 export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; tickSize: number; displayName: string; minSz: number }> = {
   ETH: { 
     instId: "ETH-USDT-SWAP", 
@@ -15,12 +14,12 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
     displayName: "SOL",
     minSz: 0.01
   },
-  DOGE: { 
-    instId: "DOGE-USDT-SWAP", 
-    contractVal: 10.0, 
-    tickSize: 0.00001, 
-    displayName: "DOGE",
-    minSz: 1.0
+  XRP: { 
+    instId: "XRP-USDT-SWAP", 
+    contractVal: 100.0, 
+    tickSize: 0.0001, 
+    displayName: "XRP",
+    minSz: 0.01
   }
 };
 
