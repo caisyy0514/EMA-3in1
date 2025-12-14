@@ -1,6 +1,6 @@
 
 {
   "name": "EMA Hunter 3in1",
-  "description": "eth、sol、xrp三合一",
+  "description": "BTC、ETH、BNB、SOL、XRP、OKB 六合一策略",
   "requestFramePermissions": []
 }
