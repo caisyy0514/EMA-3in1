@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { AIDecision } from '../types';
 import { Activity, Flame, TrendingUp, Zap, Target, AlertCircle } from 'lucide-react';
@@ -8,7 +9,7 @@ interface Props {
 
 const DecisionReport: React.FC<Props> = ({ decision }) => {
   return (
-    <div className="p-6 overflow-y-auto space-y-6 font-mono text-sm leading-relaxed text-gray-300 h-full custom-scrollbar">
+    <div className="p-6 space-y-6 font-mono text-sm leading-relaxed text-gray-300">
         <div className="space-y-2">
             <h4 className="flex items-center gap-2 text-purple-400 font-bold uppercase tracking-wider text-xs">
                 <Activity size={14}/> 01. 资金阶段分析
