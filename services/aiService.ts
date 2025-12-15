@@ -54,27 +54,6 @@ export const testConnection = async (apiKey: string): Promise<string> => {
   }
 };
 
-// --- News Fetcher (Internet Search Capability) ---
-const fetchRealTimeNews = async (): Promise<string> => {
-    try {
-        const url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=5";
-        const res = await fetch(url);
-        if (!res.ok) return "暂无法连接互联网新闻源";
-        
-        const json = await res.json();
-        if (json.Data && Array.isArray(json.Data)) {
-            const items = json.Data.slice(0, 5).map((item: any) => {
-                const time = new Date(item.published_on * 1000).toLocaleTimeString();
-                return `- [${time}] ${item.title}`;
-            });
-            return items.join("\n");
-        }
-        return "扫描未发现即时重大新闻";
-    } catch (e) {
-        return "实时搜索暂时不可用 (API Connection Error)";
-    }
-};
-
 // --- Strategy Logic: Strict EMA Trend Tracking ---
 
 function analyze1HTrend(candles: CandleData[]) {
@@ -249,8 +228,7 @@ const analyzeCoin = async (
     coinKey: string,
     apiKey: string,
     marketData: SingleMarketData,
-    accountData: AccountContext,
-    newsContext: string
+    accountData: AccountContext
 ): Promise<AIDecision> => {
     
     const config = COIN_CONFIG[coinKey];
@@ -259,7 +237,7 @@ const analyzeCoin = async (
     const TICK_SIZE = config.tickSize;
     const CONTRACT_VAL = config.contractVal;
     const INST_ID = config.instId;
-    const MIN_SZ = config.minSz || 0.01;
+    const MIN_SZ = config.minSz; 
 
     const currentPrice = parseFloat(marketData.ticker?.last || "0");
     const totalEquity = parseFloat(accountData.balance.totalEq);
@@ -280,40 +258,30 @@ const analyzeCoin = async (
     let finalTP = "";
     let invalidationReason = "";
     
+    // Determine precision for formatting prices
+    let decimals = config.tickSize < 0.01 ? 4 : 2;
+
     // --- Decision Logic ---
     if (hasPosition) {
         const p = primaryPosition!;
         const posSize = parseFloat(p.pos);
         const avgEntry = parseFloat(p.avgPx);
         const isLong = p.posSide === 'long';
+        const leverageVal = parseFloat(p.leverage) || 20;
 
-        // === PROFIT CALCULATION OPTIMIZATION (NET PnL) ===
-        // Definition: Net Profit = Upl - (Open Fee + Close Fee)
-        // Fee = Value * Rate. Value = PosSize * ContractVal * Price
-        
+        // === NET PROFIT CALCULATION ===
         const sizeCoins = posSize * CONTRACT_VAL;
-        
-        // 1. Calculate Estimated Fees (Double Side: Open + Close)
-        // Note: Using current price for close fee estimation
         const openValUsd = sizeCoins * avgEntry;
         const closeValUsd = sizeCoins * currentPrice;
         const estTotalFee = (openValUsd + closeValUsd) * TAKER_FEE_RATE;
-
-        // 2. Net PnL
         const rawUpl = parseFloat(p.upl);
         const netPnl = rawUpl - estTotalFee;
-
-        // 3. Net ROI (Return on Margin)
         const margin = parseFloat(p.margin);
-        // Safety check for div by zero
         const netRoi = margin > 0 ? (netPnl / margin) : 0;
         
         posAnalysis = `${p.posSide.toUpperCase()} ${p.pos} 张, 净ROI: ${(netRoi * 100).toFixed(2)}% (净利: ${netPnl.toFixed(2)}U)`;
 
-        // === STOP LOSS CHECK (Hard SL is preferred, but logic check here) ===
-        // Note: Logic assumes OKX handles Algo Order SL. 
-        // We only actively close if 1H Trend Reverses completely.
-        
+        // === 1. STOP LOSS CHECK (Hard Trend Reversal) ===
         let trendReversal = false;
         if (isLong && trend1H.direction === 'DOWN') trendReversal = true;
         if (!isLong && trend1H.direction === 'UP') trendReversal = true;
@@ -323,26 +291,115 @@ const analyzeCoin = async (
             invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})`;
         }
 
-        // === TAKE PROFIT LOGIC (Step-wise based on NET ROI) ===
+        // === 2. MULTI-STAGE TAKE PROFIT LOGIC ===
         if (finalAction === 'HOLD') {
             
-            // TP2: 8% NET Profit -> Close All
-            if (netRoi >= 0.08) {
-                finalAction = "CLOSE";
-                invalidationReason = `[止盈 TP2] 净收益达标 ${(netRoi*100).toFixed(2)}% (>=8%) -> 全部止盈`;
+            // Estimate "Initial" Position Size based on 10% Equity Rule
+            // This allows us to determine which "Stage" we are in statelessly
+            const estInitialValUsd = totalEquity * 0.10;
+            // Approx Contracts = (InitialMargin * Lev) / (EntryPrice * ContractVal)
+            // Note: Since Margin = (Size * Val * Price) / Lev,  Size = (Margin * Lev) / (Price * Val)
+            const estInitialQty = (estInitialValUsd * leverageVal) / (avgEntry * CONTRACT_VAL);
+            
+            // Ratio of Current vs Initial
+            const ratio = posSize / estInitialQty;
+
+            // STAGE 1: Net ROI >= 5% (Close 30% of current/total)
+            // Trigger if we are close to full position (> 85%)
+            if (netRoi >= 0.05 && ratio > 0.85) {
+                finalAction = isLong ? "SELL" : "BUY";
+                // Close 30% of Current
+                finalSize = (posSize * 0.3).toFixed(0); 
+                invalidationReason = `[阶段一止盈] ROI ${(netRoi*100).toFixed(2)}% >= 5% -> 平仓30%`;
             }
-            // TP1: 5% NET Profit -> Close 50%
-            else if (netRoi >= 0.05) {
-                const estimatedInitialMargin = totalEquity * 0.10;
-                const currentMargin = parseFloat(p.margin);
+
+            // STAGE 2: Net ROI >= 8% (Close another 30% of Initial + Move SL to BE)
+            // Trigger if we are close to 70% remaining (> 55% and <= 85%)
+            else if (netRoi >= 0.08 && ratio > 0.55 && ratio <= 0.85) {
+                 finalAction = isLong ? "SELL" : "BUY";
+                 // Target is to reach 40% Remaining.
+                 // Current is ~70%. We want to sell 30% of Initial.
+                 // 30% of Initial is approx 43% of Current (0.3/0.7).
+                 // Use simple 30% of Initial calc.
+                 let targetSell = estInitialQty * 0.3;
+                 // Cap at current size just in case
+                 if (targetSell > posSize) targetSell = posSize;
+                 
+                 finalSize = targetSell.toFixed(0);
+                 invalidationReason = `[阶段二止盈] ROI ${(netRoi*100).toFixed(2)}% >= 8% -> 再平30% (剩余仓位保本)`;
+                 
+                 // CRITICAL: We also want to move SL to Break Even.
+                 // However, we are issuing a "SELL" order here. 
+                 // The "SL Maintenance" logic below will handle the SL update in the next cycle 
+                 // OR we can rely on the user manually. 
+                 // But better: The system will execute the SELL. 
+                 // We add a hint in reasoning.
+            }
+
+            // STAGE 3: Net ROI >= 12% (Close 20% of Initial)
+            // Trigger if we are close to 40% remaining (> 30% and <= 55%)
+            else if (netRoi >= 0.12 && ratio > 0.30 && ratio <= 0.55) {
+                finalAction = isLong ? "SELL" : "BUY";
+                // Target is to reach 20% Remaining.
+                // Sell 20% of Initial.
+                let targetSell = estInitialQty * 0.2;
+                if (targetSell > posSize) targetSell = posSize;
                 
-                // If current margin is > 70% of estimated initial margin, assume we haven't done TP1 yet.
-                // This prevents repetitive selling of the remaining half.
-                if (currentMargin > (estimatedInitialMargin * 0.7)) {
-                    finalAction = isLong ? "SELL" : "BUY";
-                    finalSize = (posSize * 0.5).toFixed(2); // 50%
-                    invalidationReason = `[止盈 TP1] 净收益达标 ${(netRoi*100).toFixed(2)}% (>=5%) -> 平半仓`;
+                finalSize = targetSell.toFixed(0);
+                invalidationReason = `[阶段三止盈] ROI ${(netRoi*100).toFixed(2)}% >= 12% -> 再平20% (保留尾仓)`;
+            }
+
+            // STAGE 4: Final 20% (Trailing Stop / Retracement Logic)
+            // Trigger if we are <= 30% remaining
+            else if (ratio <= 0.30) {
+                // Rule: "In this stage, when net profit retraces more than 5%"
+                // Interpretation: If ROI drops more than 5% (equity) from the threshold (12%), or dynamic trailing.
+                // Hard floor: We achieved 12% to get here. If we drop below 7% (12-5), CLOSE ALL.
+                if (netRoi < 0.07) {
+                    finalAction = "CLOSE";
+                    invalidationReason = `[阶段四清仓] ROI回撤至 ${(netRoi*100).toFixed(2)}% (<7%) -> 获利了结`;
+                } else {
+                    // Logic: Implement a Trailing Stop of 5% ROI distance.
+                    // Price Delta for 5% ROI = (0.05 * Entry) / Lev.
+                    const roiBuffer = 0.05;
+                    const priceBuffer = (roiBuffer * avgEntry) / leverageVal;
+                    
+                    let targetSL = 0;
+                    if (isLong) targetSL = currentPrice - priceBuffer;
+                    else targetSL = currentPrice + priceBuffer;
+                    
+                    // Ensure TargetSL is at least at 7% Profit level (Floor)
+                    const minRoi = 0.07;
+                    const minProfitDelta = (minRoi * avgEntry) / leverageVal;
+                    let floorSL = isLong ? avgEntry + minProfitDelta : avgEntry - minProfitDelta;
+                    
+                    // Final SL is the tighter (more profitable) of the two
+                    let finalSLVal = isLong ? Math.max(targetSL, floorSL) : Math.min(targetSL, floorSL);
+                    
+                    // Check if current SL is "worse" than finalSLVal by a margin, if so update it.
+                    // Or simply output UPDATE_TPSL constantly to trail.
+                    finalAction = "UPDATE_TPSL";
+                    finalSL = finalSLVal.toFixed(decimals);
+                    invalidationReason = `[阶段四护盘] 移动止损追踪 (回撤阈值5%)`;
                 }
+            }
+
+            // === SPECIAL MAINTENANCE: SL UPDATE FOR STAGE 2 ===
+            // If we are past Stage 1 (ratio < 0.85) AND Profit is decent (>2%) 
+            // BUT SL is not at Break Even yet (e.g. SL is 0 or worse than Entry), move it.
+            // This catches the post-Stage-2-sell state.
+            if (finalAction === 'HOLD' && ratio <= 0.85 && netRoi > 0.02) {
+                 const currentSL = parseFloat(p.slTriggerPx || "0");
+                 // Check if SL is "Safe" (Profit Side)
+                 const isSLSafe = isLong ? (currentSL > avgEntry) : (currentSL > 0 && currentSL < avgEntry);
+                 
+                 if (!isSLSafe) {
+                     finalAction = "UPDATE_TPSL";
+                     // Add tiny buffer for fees
+                     const feeBuffer = avgEntry * 0.001; 
+                     finalSL = isLong ? (avgEntry + feeBuffer).toFixed(decimals) : (avgEntry - feeBuffer).toFixed(decimals);
+                     invalidationReason = `[风控] 既然已部分止盈，强制移动止损至保本位`;
+                 }
             }
         }
 
@@ -351,11 +408,6 @@ const analyzeCoin = async (
         if (entry3m.signal) {
             finalAction = entry3m.action;
             finalSize = "10%"; // Rule: 10% of Total Account
-            
-            // Determine precision for formatting SL price
-            // Default logic: tickSize < 0.01 ? 4 : 2
-            let decimals = config.tickSize < 0.01 ? 4 : 2;
-
             finalSL = entry3m.sl.toFixed(decimals);
         }
     }
@@ -367,8 +419,12 @@ const analyzeCoin = async (
 当前时间: ${new Date().toLocaleString()}
 
 **核心原则**:
-1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。保本是第一要务。
-2. **无限利润放大**: 在确保净利润为正的前提下，尽可能让利润奔跑。
+1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)，保本是第一要务。
+2. **多阶段止盈 (由代码逻辑主导，你只需确认)**:
+   - 阶段一(ROI>5%): 平30%。
+   - 阶段二(ROI>8%): 再平30%（按初始仓位计） + 并将止损设置跨过盈亏平衡价（持多单向上跨越，持空单向下跨越）。
+   - 阶段三(ROI>12%): 再平20%（按初始仓位计）。
+   - 阶段四(尾仓): 实施 5% ROI 的移动止损（Trailing Stop），或在利润回撤至 7% 以下时直接清仓。
 
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
@@ -377,24 +433,24 @@ const analyzeCoin = async (
 2. **3m 入场**:
    - 做多: 1H涨势下，3m图出现 [死叉 EMA15<60] -> [金叉 EMA15>60]。金叉K线收盘进场。
    - 做空: 1H跌势下，3m图出现 [金叉 EMA15>60] -> [死叉 EMA15<60]。死叉K线收盘进场。
-   - **执行指令**: 如果 "3m 信号" 显示 "TRIGGERED"，说明满足条件，**必须**输出 ACTION 为 BUY 或 SELL，不要因为"错过最佳点"而观望。只要信号触发，就是有效。
 3. **资金**: 10% 权益。
 4. **止损**: 3m 趋势下前一个反向交叉区间的极值（多单找死叉区间最低，空单找金叉区间最高）。
-5. **止盈**: 净利润达5%平半仓，净利润达8%清仓。
 
 **当前状态**:
 - 1H: ${trend1H.description}
 - 3m: ${entry3m.structure}
 - 信号: ${entry3m.signal ? "触发开仓" : entry3m.reason}
 - 持仓: ${posAnalysis}
+- 建议动作: ${finalAction} ${finalSize !== "0" ? `(数量: ${finalSize})` : ""}
 
 **输出要求**:
 1. 返回格式必须为 JSON。
-2. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
-3. **hot_events_overview** 字段：仔细阅读提供的 News 英文数据，将其翻译并提炼为简练的中文市场热点摘要。
-4. **market_assessment** 字段：必须明确包含以下两行结论：
+2. **market_assessment**: 必须明确包含以下两行结论：
    - 【1H趋势】：${trend1H.description} 明确指出当前1小时级别EMA15和EMA60的关系（ [金叉 EMA15>60] 或 [死叉 EMA15<60]）是上涨还是下跌。
    - 【3m入场】：：${entry3m.structure} - ${entry3m.signal ? "满足入场" : "等待机会"}明确指出当前3分钟级别是否满足策略定义的入场条件，并说明原因。
+3. **重要**: 所有文本分析字段（stage_analysis, market_assessment, hot_events_overview, eth_analysis, reasoning, invalidation_condition）必须使用 **中文 (Simplified Chinese)** 输出。
+4. **hot_events_overview**: 直接输出 "策略配置已禁用热点分析"。
+5. 根据 "建议动作" 生成最终 JSON。
 
 请基于上述逻辑生成JSON决策。
 `;
@@ -402,7 +458,7 @@ const analyzeCoin = async (
     try {
         const text = await callDeepSeek(apiKey, [
             { role: "system", content: systemPrompt },
-            { role: "user", content: `Account: ${totalEquity} USDT. Coin: ${coinKey}. News Data: ${newsContext}` }
+            { role: "user", content: `Account: ${totalEquity} USDT. Coin: ${coinKey}.` }
         ]);
 
         const tDirection = trend1H.description;
@@ -411,9 +467,9 @@ const analyzeCoin = async (
         let decision: AIDecision = {
             coin: coinKey,
             instId: INST_ID,
-            stage_analysis: "EMA严格趋势策略",
+            stage_analysis: "EMA严格趋势策略 (四阶段止盈版)",
             market_assessment: `【1H趋势】：${tDirection}\n【3m入场】：${tEntry}`,
-            hot_events_overview: "正在分析热点...",
+            hot_events_overview: "策略配置已禁用热点分析", // Hardcoded per user request
             coin_analysis: `趋势: ${tDirection}。状态: ${posAnalysis}`,
             trading_decision: {
                 action: finalAction as any,
@@ -435,7 +491,8 @@ const analyzeCoin = async (
             const aiJson = JSON.parse(cleanText);
             
             if(aiJson.market_assessment) decision.market_assessment = aiJson.market_assessment;
-            if(aiJson.hot_events_overview) decision.hot_events_overview = aiJson.hot_events_overview;
+            // Force disable hot events overwrite
+            decision.hot_events_overview = "策略配置已禁用热点分析";
             if(aiJson.coin_analysis) decision.coin_analysis = aiJson.coin_analysis;
             if(aiJson.reasoning) decision.reasoning = `${decision.reasoning} | AI视角: ${aiJson.reasoning}`;
 
@@ -443,7 +500,7 @@ const analyzeCoin = async (
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (Preserving Integer Only logic) ---
+        // --- SIZE CALCULATION (CRITICAL FIX FOR LOT SIZE) ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
@@ -464,20 +521,16 @@ const analyzeCoin = async (
                 
                 let rawContracts = targetAmountU / marginPerContract;
                 
-                // --- FIX for Integer Only Contracts (XRP/DOGE/Etc where minSz >= 1) ---
-                if (config.minSz >= 1) {
-                    contracts = Math.floor(rawContracts);
-                } else {
-                    // ETH/SOL (Decimals allowed)
-                    contracts = Math.floor(rawContracts * 100) / 100;
-                }
+                // --- STRICT INTEGER ENFORCEMENT FOR OKX SWAPS ---
+                // All OKX Swap/Future contracts are integers (sz). 
+                contracts = Math.floor(rawContracts);
 
-                // --- FIX for Small Size < Min ---
+                // Check Minimum Size
                 if (contracts < MIN_SZ) {
                     const costForMin = marginPerContract * MIN_SZ;
                     if (maxAffordableU >= costForMin) {
                         contracts = MIN_SZ;
-                        decision.reasoning += ` [保底交易] 资金计算量不足${MIN_SZ}张，强制执行最小单位`;
+                        decision.reasoning += ` [保底交易] 资金量不足${MIN_SZ}张，强制执行最小单位`;
                     } else {
                         decision.action = 'HOLD';
                         decision.size = "0";
@@ -486,13 +539,18 @@ const analyzeCoin = async (
                     }
                 }
             } else {
-                // Partial Close (Size is already a number string like "15.5")
-                contracts = parseFloat(finalSize);
-                if (config.minSz >= 1) contracts = Math.floor(contracts);
+                // Partial Close (Size is already a number string like "15")
+                // Even for partial close, we must floor it to be safe for API
+                contracts = Math.floor(parseFloat(finalSize));
             }
 
             if (contracts > 0 && decision.action !== 'HOLD') {
                 decision.size = contracts.toString();
+                // --- ENHANCED REASONING: Add Executed Size & Value ---
+                const leverage = parseFloat(DEFAULT_LEVERAGE); 
+                const estimatedValue = (contracts * CONTRACT_VAL * currentPrice).toFixed(2);
+                decision.reasoning += ` [执行细节: ${contracts}张 (约${estimatedValue}U)]`;
+
             } else if (decision.action !== 'HOLD') {
                 decision.action = 'HOLD'; 
             }
@@ -524,13 +582,15 @@ export const getTradingDecision = async (
     marketData: MarketDataCollection,
     accountData: AccountContext
 ): Promise<AIDecision[]> => {
-    const newsContext = await fetchRealTimeNews();
+    // Disabled News Fetching to save tokens
+    // const newsContext = await fetchRealTimeNews();
 
     const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
         if (!marketData[coinKey]) return null;
-        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, newsContext);
+        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData);
     });
 
     const results = await Promise.all(promises);
     return results.filter((r): r is AIDecision => r !== null);
 };
+
