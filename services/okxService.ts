@@ -68,41 +68,32 @@ const enrichCandlesWithEMA = (candles: CandleData[]): CandleData[] => {
 async function fetchSingleCoinData(coinKey: string, config: any): Promise<SingleMarketData> {
     const instId = COIN_CONFIG[coinKey].instId;
     
+    // 1. Ticker (Critical)
     const tickerRes = await fetch(`${BASE_URL}/api/v5/market/ticker?instId=${instId}`);
     const tickerJson = await tickerRes.json();
-    
-    // Existing (Optional but kept for compatibility)
-    const candles5mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=5m&limit=50`);
-    const candles5mJson = await candles5mRes.json();
-    
-    // 15m (Kept for compatibility)
-    const candles15mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=15m&limit=50`);
-    const candles15mJson = await candles15mRes.json();
+    if (tickerJson.code !== '0') throw new Error(`Ticker Error: ${tickerJson.msg}`);
 
-    // NEW: 1H for Trend - Increased to 300 to ensure EMA60 is accurate
+    // Optimization: Remove unused calls (5m, 15m, Funding, OI) to save rate limits
+    // Only fetch what is strictly needed for the Strategy (1H Trend, 3m Entry)
+
+    // 2. 1H for Trend
     const candles1HRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=1H&limit=300`);
     const candles1HJson = await candles1HRes.json();
+    if (candles1HJson.code !== '0') throw new Error(`1H Candle Error: ${candles1HJson.msg}`);
 
-    // NEW: 3m for Entry/Exit - Increased limit to 300 to capture pre-cross intervals
+    // 3. 3m for Entry/Exit
     const candles3mRes = await fetch(`${BASE_URL}/api/v5/market/candles?instId=${instId}&bar=3m&limit=300`);
     const candles3mJson = await candles3mRes.json();
-
-    const fundingRes = await fetch(`${BASE_URL}/api/v5/public/funding-rate?instId=${instId}`);
-    const fundingJson = await fundingRes.json();
-    
-    const oiRes = await fetch(`${BASE_URL}/api/v5/public/open-interest?instId=${instId}`);
-    const oiJson = await oiRes.json();
-
-    if (tickerJson.code !== '0') throw new Error(`OKX API Error (Ticker ${coinKey}): ${tickerJson.msg}`);
+    if (candles3mJson.code !== '0') throw new Error(`3m Candle Error: ${candles3mJson.msg}`);
 
     return {
       ticker: tickerJson.data[0],
-      candles5m: formatCandles(candles5mJson.data),
-      candles15m: formatCandles(candles15mJson.data),
+      candles5m: [], // Unused
+      candles15m: [], // Unused
       candles1H: enrichCandlesWithEMA(formatCandles(candles1HJson.data)),
       candles3m: enrichCandlesWithEMA(formatCandles(candles3mJson.data)),
-      fundingRate: fundingJson.data[0]?.fundingRate || "0",
-      openInterest: oiJson.data[0]?.oi || "0",
+      fundingRate: "0", // Unused
+      openInterest: "0", // Unused
       orderbook: {}, 
       trades: [],
     };
@@ -113,25 +104,23 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
     return generateMockMarketData();
   }
 
-  try {
-    const results: Partial<MarketDataCollection> = {};
-    const promises = Object.keys(COIN_CONFIG).map(async (coin) => {
-        try {
-            const data = await fetchSingleCoinData(coin, config);
-            results[coin] = data;
-        } catch (e: any) {
-            console.error(`Failed to fetch data for ${coin}:`, e.message);
-            // We might want to omit this coin or return partial data
-        }
-    });
-    
-    await Promise.all(promises);
-    return results as MarketDataCollection;
-
-  } catch (error: any) {
-    console.error("OKX API 获取失败:", error);
-    throw new Error(`无法连接 OKX API: ${error.message}`);
+  const results: Partial<MarketDataCollection> = {};
+  const coins = Object.keys(COIN_CONFIG);
+  
+  // Use sequential processing to strictly respect Rate Limits (Status 429)
+  for (const coin of coins) {
+      try {
+          const data = await fetchSingleCoinData(coin, config);
+          results[coin] = data;
+          // Small delay (200ms) between coins to avoid bursting the API
+          await new Promise(r => setTimeout(r, 200));
+      } catch (e: any) {
+          console.error(`Failed to fetch data for ${coin}:`, e.message);
+          // Don't fail entire batch if one coin fails
+      }
   }
+  
+  return results as MarketDataCollection;
 };
 
 // Fetch Pending Algo Orders (TP/SL)
