@@ -489,7 +489,7 @@ const analyzeCoin = async (
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (Strict Balance Check Logic) ---
+        // --- SIZE CALCULATION (Strict Balance Check Logic with MinSz Quantization) ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
@@ -516,15 +516,24 @@ const analyzeCoin = async (
                 
                 // 1. Calculate Target Strategy Size
                 let targetContracts = 0;
+                let rawContracts = 0;
                 
                 if (finalSize.includes('%')) {
                     const pct = parseFloat(finalSize) / 100; 
                     // Strategy Amount in USDT (Margin allocation)
                     const strategyMarginAlloc = totalEquity * pct;
-                    targetContracts = Math.floor(strategyMarginAlloc / marginPerContract);
+                    rawContracts = strategyMarginAlloc / marginPerContract;
                 } else {
-                    targetContracts = Math.floor(parseFloat(finalSize));
+                    rawContracts = parseFloat(finalSize);
                 }
+
+                // Quantize based on MIN_SZ (Replacing Math.floor)
+                // Using formula: Math.floor(raw / MIN_SZ) * MIN_SZ to handle both integer and decimal minSz
+                targetContracts = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
+                
+                // Fix JS floating point precision (e.g. 0.15000000002)
+                const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
+                targetContracts = parseFloat(targetContracts.toFixed(precision));
 
                 const targetMargin = targetContracts * marginPerContract;
 
@@ -553,24 +562,29 @@ const analyzeCoin = async (
                 }
             } else {
                 // === CLOSING LOGIC (Standard) ===
-                // Parse the size decided by strategy (e.g. "30" from "30% of initial")
-                contracts = Math.floor(parseFloat(finalSize));
+                let rawContracts = parseFloat(finalSize);
+                
+                // Quantize Closing Size
+                let targetContracts = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
+                const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
+                contracts = parseFloat(targetContracts.toFixed(precision));
                 
                 // Safety check: Don't close more than held
                 const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
                 
                 if (contracts < MIN_SZ) {
-                    // Prevent dust closing errors if API rejects < 1
-                    // If we hold >= MIN_SZ, force at least MIN_SZ close to ensure execution?
-                    // Or if held < MIN_SZ (dust), close all.
                     if (held < MIN_SZ) {
-                        contracts = Math.floor(held); // Close dust
+                        contracts = held; // Close dust (assuming allowed if exact match)
                     } else if (contracts > 0) {
-                        contracts = MIN_SZ; // Round up to min size
+                        contracts = MIN_SZ; // Round up to min size if > 0
                     }
                 }
                 
-                if (contracts > held) contracts = Math.floor(held);
+                // Ensure we don't exceed holding
+                if (contracts > held) contracts = held;
+                
+                // Format for logging
+                contracts = parseFloat(contracts.toFixed(precision));
                 calcDetails = `[平仓执行] 计划平: ${contracts}张, 持仓: ${held}张`;
             }
 
