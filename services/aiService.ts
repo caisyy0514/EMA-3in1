@@ -406,8 +406,8 @@ const analyzeCoin = async (
 1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。
 2. **多阶段止盈 (严格顺序)**:
    - 阶段一(满仓): ROI≥5% 平30%。
-   - 阶段二(剩余<85%): ROI≥8% 平30%（按初始仓位计） + 移动止损至保本。
-   - 阶段三(剩余<55%): ROI≥12% 平20%（按初始仓位计）。
+   - 阶段二(剩余<85%): ROI≥8% 平30% + 移动止损至保本。
+   - 阶段三(剩余<55%): ROI≥12% 平20%。
    - 阶段四(尾仓<30%): 实施5% ROI间距的移动止损，回撤即清仓。
 
 **策略规则**:
@@ -465,11 +465,21 @@ const analyzeCoin = async (
             const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiJson = JSON.parse(cleanText);
             
-            if(aiJson.market_assessment) decision.market_assessment = aiJson.market_assessment;
+            // SANITIZATION: Ensure fields are strings to prevent React rendering crashes
+            const ensureString = (val: any) => {
+                if (typeof val === 'string') return val;
+                if (typeof val === 'object') return JSON.stringify(val);
+                return String(val || '');
+            };
+
+            if(aiJson.market_assessment) decision.market_assessment = ensureString(aiJson.market_assessment);
             // Force disable hot events overwrite
             decision.hot_events_overview = "策略配置已禁用热点分析";
-            if(aiJson.coin_analysis) decision.coin_analysis = aiJson.coin_analysis;
-            if(aiJson.reasoning) decision.reasoning = `${decision.reasoning} | AI视角: ${aiJson.reasoning}`;
+            if(aiJson.coin_analysis) decision.coin_analysis = ensureString(aiJson.coin_analysis);
+            if(aiJson.reasoning) {
+                 const reasoningStr = ensureString(aiJson.reasoning);
+                 decision.reasoning = `${decision.reasoning} | AI视角: ${reasoningStr}`;
+            }
 
         } catch (e) {
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
