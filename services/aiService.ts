@@ -1,5 +1,5 @@
 
-import { AIDecision, MarketDataCollection, AccountContext, CandleData, SingleMarketData } from "../types";
+import { AIDecision, MarketDataCollection, AccountContext, CandleData, SingleMarketData, SystemLog } from "../types";
 import { COIN_CONFIG, TAKER_FEE_RATE, DEFAULT_LEVERAGE } from "../constants";
 
 // --- DeepSeek API Helper ---
@@ -217,7 +217,8 @@ const analyzeCoin = async (
     coinKey: string,
     apiKey: string,
     marketData: SingleMarketData,
-    accountData: AccountContext
+    accountData: AccountContext,
+    logs: SystemLog[]
 ): Promise<AIDecision> => {
     
     const config = COIN_CONFIG[coinKey];
@@ -257,6 +258,7 @@ const analyzeCoin = async (
         const avgEntry = parseFloat(p.avgPx);
         const isLong = p.posSide === 'long';
         const leverageVal = parseFloat(p.leverage) || 20;
+        const posCreationTime = parseInt(p.cTime);
 
         // === NET PROFIT CALCULATION ===
         const sizeCoins = posSize * CONTRACT_VAL;
@@ -281,7 +283,7 @@ const analyzeCoin = async (
             invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})，强制平仓`;
         }
 
-        // === 2. SEQUENTIAL TAKE PROFIT & TRAILING STOP (STATE MACHINE) ===
+        // === 2. SEQUENTIAL TAKE PROFIT & TRAILING STOP (Backtracking Logic) ===
         
         if (finalAction === 'HOLD') {
             
@@ -291,43 +293,50 @@ const analyzeCoin = async (
             const strategyAllocatedEquity = equityAtEntry * 0.10; 
             const estInitialQty = (strategyAllocatedEquity * leverageVal) / (avgEntry * CONTRACT_VAL);
             
-            // Ratio: 当前剩余仓位 / 估算初始总量
-            // 假设初始为1.0, 平30%后剩0.7, 再平30%后剩0.4, 再平20%后剩0.2
-            const ratio = posSize / estInitialQty;
+            // --- ACTION BACKTRACKING STAGE DETERMINATION ---
+            // 依据日志回溯确定当前处于哪个阶段
+            let currentStage = 1;
 
-            // --- STAGE 1 (满仓/高仓位阶段) ---
-            // 剩余仓位 > 85% (即未执行过第一次止盈)
-            if (ratio > 0.85) {
+            // Filter logs related to this coin AND occurred AFTER position creation
+            const relevantLogs = logs.filter(log => {
+                return log.timestamp.getTime() > posCreationTime && log.message.includes(`[${coinKey}]`);
+            });
+
+            const hasStage1TP = relevantLogs.some(l => l.message.includes("阶段一止盈") && l.type === 'TRADE'); // Check TRADE type to ensure execution
+            const hasStage2TP = relevantLogs.some(l => l.message.includes("阶段二止盈") && l.type === 'TRADE');
+            const hasStage3TP = relevantLogs.some(l => l.message.includes("阶段三止盈") && l.type === 'TRADE');
+
+            if (hasStage3TP) currentStage = 4;
+            else if (hasStage2TP) currentStage = 3;
+            else if (hasStage1TP) currentStage = 2;
+            else currentStage = 1;
+
+            // --- STAGE EXECUTION ---
+
+            // --- STAGE 1 (满仓阶段) ---
+            if (currentStage === 1) {
                 // Rule: Net ROI >= 5% -> Close 30% of INITIAL
                 if (netRoi >= 0.05) {
                     finalAction = isLong ? "SELL" : "BUY";
-                    // 平仓量 = 初始开仓总量 * 30%
                     finalSize = (estInitialQty * 0.3).toFixed(0); 
                     invalidationReason = `[阶段一止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 5% -> 平仓初始量的30%`;
                 }
             }
 
             // --- STAGE 2 (执行过一次止盈) ---
-            // 剩余仓位在 55% ~ 85% 之间 (理论值0.7)
-            else if (ratio > 0.55) { 
+            else if (currentStage === 2) { 
                 // Rule 1: Net ROI >= 8% -> Close 30% of INITIAL
                 if (netRoi >= 0.08) {
                     finalAction = isLong ? "SELL" : "BUY";
                     finalSize = (estInitialQty * 0.3).toFixed(0);
                     invalidationReason = `[阶段二止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 8% -> 再平初始量的30%`;
-                    
-                    // 注意：此阶段平仓后，下一步会检查保本损。由于这是并行逻辑，
-                    // 若需要同时平仓和改损，策略引擎会先执行平仓，下一次循环执行改损。
-                    // 或者我们可以假设平仓命令发出后，下一轮循环会进入 "else" 逻辑来设置保本。
                 } 
                 // Rule 2: Force Break Even SL (Stage 2 Mandatory)
-                // 既然处于阶段二（说明阶段一已达成），必须将止损调整为开仓成本价
                 else {
                     const currentSL = parseFloat(p.slTriggerPx || "0");
-                    const feeBuffer = avgEntry * 0.002; // 0.2% buffer to cover fees safely
+                    const feeBuffer = avgEntry * 0.002;
                     const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
                     
-                    // Check if SL is secured (Better than or equal to BE)
                     const isSecured = isLong ? (currentSL >= bePrice) : (currentSL > 0 && currentSL <= bePrice);
                     
                     if (!isSecured) {
@@ -339,31 +348,24 @@ const analyzeCoin = async (
             }
 
             // --- STAGE 3 (执行过两次止盈) ---
-            // 剩余仓位在 30% ~ 55% 之间 (理论值0.4)
-            else if (ratio > 0.30) {
+            else if (currentStage === 3) {
                 // Rule: Net ROI >= 12% -> Close 20% of INITIAL
                 if (netRoi >= 0.12) {
                     finalAction = isLong ? "SELL" : "BUY";
                     finalSize = (estInitialQty * 0.2).toFixed(0);
                     invalidationReason = `[阶段三止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 12% -> 再平初始量的20%`;
                 }
-                // (保本损已在阶段二设置，保持不变)
+                // (保本损已在阶段二设置)
             }
 
             // --- STAGE 4 (尾仓阶段) ---
-            // 剩余仓位 <= 30% (理论值0.2)
-            else { 
+            else if (currentStage === 4) { 
                 // Rule: Trailing Stop for the remaining 20%
-                // "浮盈最高点回落5%时，即刻市价清仓"
-                // 实现：设置一个动态止损，止损价 = 当前价 - (5% ROI对应的价差)
-                // 随着价格上涨，止损价上移；价格下跌，止损价不变。触及即平。
-                
                 // 1. Calculate Price Delta equivalent to 5% ROI
                 const roiGap = 0.05;
                 const priceGap = (roiGap * avgEntry) / leverageVal;
                 
                 // 2. Calculate Target SL based on CURRENT price
-                // Long: Price - Gap; Short: Price + Gap
                 let targetSL = isLong ? currentPrice - priceGap : currentPrice + priceGap;
                 
                 // 3. Compare with Existing SL
@@ -371,14 +373,13 @@ const analyzeCoin = async (
                 let needUpdate = false;
                 
                 if (isLong) {
-                    // Update if Target SL is higher than Current SL (Ratchet up) OR if no SL
+                    // Update if Target SL is higher than Current SL
                     if (currentSL === 0 || targetSL > currentSL) {
-                        // Ensure we don't set SL above current price (instant trigger) - though logic implies we track below
                         finalSL = targetSL.toFixed(decimals);
                         needUpdate = true;
                     } 
                 } else {
-                    // Update if Target SL is lower than Current SL (Ratchet down) OR if no SL
+                    // Update if Target SL is lower than Current SL
                     if (currentSL === 0 || targetSL < currentSL) {
                         finalSL = targetSL.toFixed(decimals);
                         needUpdate = true;
@@ -433,7 +434,7 @@ const analyzeCoin = async (
 **输出要求**:
 1. 返回格式必须为 JSON。
 2. **market_assessment**: 包含【1H趋势】和【3m入场】的中文描述。
-3. **reasoning**: 解释阶段判断逻辑，明确当前止盈阶段。
+3. **reasoning**: 解释阶段判断逻辑，明确当前所属的止盈阶段。
 4. 根据 "建议动作" 生成最终 JSON。
 `;
 
@@ -492,7 +493,7 @@ const analyzeCoin = async (
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (Balance Check Logic) ---
+        // --- SIZE CALCULATION (Strict Balance Check Logic) ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
@@ -513,9 +514,19 @@ const analyzeCoin = async (
                 const strategyAmountU = totalEquity * pct;
                 
                 if (!isClose) {
-                    const maxAffordableU = availEquity; // USE FULL BALANCE, NO BUFFER
-                    const targetAmountU = Math.min(strategyAmountU, maxAffordableU);
-                    contracts = Math.floor(targetAmountU / marginPerContract);
+                    // STRICT BALANCE CHECK FOR OPENING
+                    // 1. Calculate ideal contract size based on Strategy
+                    contracts = Math.floor(strategyAmountU / marginPerContract);
+                    const costForIdeal = contracts * marginPerContract;
+
+                    // 2. Check if we can afford the ideal size
+                    if (availEquity >= costForIdeal) {
+                        // We can afford it, proceed with calculated contracts
+                        // If calculated contracts < MIN_SZ, that's a strategy constraint, handled below
+                    } else {
+                        // We cannot afford ideal size, scale down to max affordable
+                        contracts = Math.floor(availEquity / marginPerContract);
+                    }
                 } else {
                     contracts = Math.floor(strategyAmountU / marginPerContract);
                 }
@@ -529,7 +540,6 @@ const analyzeCoin = async (
             if (contracts < MIN_SZ) {
                 if (isClose) {
                      // For CLOSE/REDUCE:
-                     // If we hold >= MIN_SZ, force at least MIN_SZ close to ensure TP works.
                      const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
                      if (held >= MIN_SZ) {
                          contracts = MIN_SZ; 
@@ -539,13 +549,12 @@ const analyzeCoin = async (
                      }
                 } else {
                     // For OPEN:
-                    // Only force Min Size if we actually have money for it.
+                    // Check if we can afford MIN_SZ
                     const costForMin = marginPerContract * MIN_SZ;
                     
-                    // STRICT CHECK: Do we have enough avail equity for MIN_SZ?
                     if (availEquity >= costForMin) {
                         contracts = MIN_SZ;
-                        decision.reasoning += ` [保底交易] 余额充足(${availEquity.toFixed(2)}U >= ${costForMin.toFixed(2)}U)，强制最小开仓`;
+                        decision.reasoning += ` [保底交易] 策略仓位不足最小单位，强制最小开仓`;
                     } else {
                         decision.action = 'HOLD';
                         decision.size = "0";
@@ -589,14 +598,15 @@ const analyzeCoin = async (
 export const getTradingDecision = async (
     apiKey: string,
     marketData: MarketDataCollection,
-    accountData: AccountContext
+    accountData: AccountContext,
+    logs: SystemLog[]
 ): Promise<AIDecision[]> => {
     // Disabled News Fetching to save tokens
     // const newsContext = await fetchRealTimeNews();
 
     const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
         if (!marketData[coinKey]) return null;
-        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData);
+        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, logs);
     });
 
     const results = await Promise.all(promises);
