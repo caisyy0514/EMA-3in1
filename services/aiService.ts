@@ -304,56 +304,79 @@ const analyzeCoin = async (
             const estInitialQty = (estInitialValUsd * leverageVal) / (avgEntry * CONTRACT_VAL);
             
             // Ratio of Current vs Initial
-            // This ratio determines which stage of the trade we are in.
-            // > 0.85: Stage 1 (Initial / Full)
-            // 0.55 - 0.85: Stage 2 (Post Stage 1 Sell)
-            // 0.30 - 0.55: Stage 3 (Post Stage 2 Sell)
-            // <= 0.30: Stage 4 (Tail)
             const ratio = posSize / estInitialQty;
+            
+            // --- Helper: check if we are truly in a stage based on ROI ---
+            // If we have very small position but low ROI, we are NOT in Stage 4, we are just poor.
+            // This prevents "Small Initial Position" from being treated as "Stage 4 Tail".
+            
+            // STAGE 1 Check:
+            const isStage1Logic = () => {
+                 if (netRoi >= 0.05 && ratio > 0.85) return true;
+                 // Fallback: If Ratio is small (e.g. manual small open) but ROI hasn't hit Stage 2 yet, treat as Stage 1
+                 if (ratio <= 0.85 && netRoi >= 0.05 && netRoi < 0.08) return true;
+                 return false;
+            };
 
-            // STAGE 1: Net ROI >= 5% (Close 30% of current/total)
-            // Trigger if we are close to full position (> 85%)
-            if (netRoi >= 0.05 && ratio > 0.85) {
+            // STAGE 2 Check:
+            const isStage2Logic = () => {
+                 // Standard path: Ratio reduced, ROI increased
+                 if (netRoi >= 0.08 && ratio > 0.55 && ratio <= 0.85) return true;
+                 // Fallback: Small position, ROI in Stage 2 zone
+                 if (ratio <= 0.55 && netRoi >= 0.08 && netRoi < 0.12) return true;
+                 return false;
+            };
+
+            // STAGE 3 Check:
+            const isStage3Logic = () => {
+                 if (netRoi >= 0.12 && ratio > 0.30 && ratio <= 0.55) return true;
+                 // Fallback: Small position, ROI in Stage 3 zone (but not yet secure enough for tail)
+                 // Actually, if ROI > 12%, we are happy. 
+                 return false;
+            };
+            
+            // STAGE 4 Check:
+            // STRICT REQUIREMENT: Must have achieved Stage 3 Profit Levels (ROI >= 12%) before entering Stage 4 logic.
+            const isStage4Logic = () => {
+                 // Only enter Stage 4 if we are "Tail" size AND we have "Tail" profits.
+                 if (ratio <= 0.30 && netRoi >= 0.12) return true;
+                 return false;
+            };
+
+
+            // --- EXECUTION ---
+            
+            if (isStage1Logic()) {
                 finalAction = isLong ? "SELL" : "BUY";
-                // Close 30% of Current
                 finalSize = (posSize * 0.3).toFixed(0); 
                 invalidationReason = `[阶段一止盈] ROI ${(netRoi*100).toFixed(2)}% >= 5% -> 平仓30%`;
             }
-
-            // STAGE 2: Net ROI >= 8% (Close another 30% of Initial + Move SL to BE)
-            // Trigger if we are close to 70% remaining (> 55% and <= 85%)
-            else if (netRoi >= 0.08 && ratio > 0.55 && ratio <= 0.85) {
+            else if (isStage2Logic()) {
                  finalAction = isLong ? "SELL" : "BUY";
-                 // Target is to reach 40% Remaining.
+                 // Target 40% Remaining (approx close 30% of initial)
                  let targetSell = estInitialQty * 0.3;
+                 // Safety: Don't sell more than we have
                  if (targetSell > posSize) targetSell = posSize;
                  
                  finalSize = targetSell.toFixed(0);
-                 invalidationReason = `[阶段二止盈] ROI ${(netRoi*100).toFixed(2)}% >= 8% -> 再平30% (剩余仓位保本)`;
-                 // Note: SL update happens in the next tick via the maintenance block below
+                 invalidationReason = `[阶段二止盈] ROI ${(netRoi*100).toFixed(2)}% >= 8% -> 再平30%`;
             }
-
-            // STAGE 3: Net ROI >= 12% (Close 20% of Initial)
-            // Trigger if we are close to 40% remaining (> 30% and <= 55%)
-            else if (netRoi >= 0.12 && ratio > 0.30 && ratio <= 0.55) {
+            else if (isStage3Logic()) {
                 finalAction = isLong ? "SELL" : "BUY";
-                // Target is to reach 20% Remaining.
+                // Target 20% Remaining (approx close 20% of initial)
                 let targetSell = estInitialQty * 0.2;
                 if (targetSell > posSize) targetSell = posSize;
                 
                 finalSize = targetSell.toFixed(0);
                 invalidationReason = `[阶段三止盈] ROI ${(netRoi*100).toFixed(2)}% >= 12% -> 再平20% (保留尾仓)`;
             }
-
-            // STAGE 4: Final 20% (Trailing Stop / Retracement Logic)
-            // Trigger if we are <= 30% remaining
-            else if (ratio <= 0.30) {
-                // Rule: "In this stage, when net profit retraces more than 5%"
+            else if (isStage4Logic()) {
+                // Rule: "In this stage, when net profit retraces more than 5% (to 7%)"
                 if (netRoi < 0.07) {
                     finalAction = "CLOSE";
                     invalidationReason = `[阶段四清仓] ROI回撤至 ${(netRoi*100).toFixed(2)}% (<7%) -> 获利了结`;
                 } else {
-                    // Logic: Implement a Trailing Stop of 5% ROI distance.
+                    // Logic: Trailing Stop
                     const roiBuffer = 0.05;
                     const priceBuffer = (roiBuffer * avgEntry) / leverageVal;
                     
@@ -361,7 +384,7 @@ const analyzeCoin = async (
                     if (isLong) targetSL = currentPrice - priceBuffer;
                     else targetSL = currentPrice + priceBuffer;
                     
-                    // Ensure TargetSL is at least at 7% Profit level (Floor)
+                    // Floor SL at 7% profit
                     const minRoi = 0.07;
                     const minProfitDelta = (minRoi * avgEntry) / leverageVal;
                     let floorSL = isLong ? avgEntry + minProfitDelta : avgEntry - minProfitDelta;
@@ -373,21 +396,26 @@ const analyzeCoin = async (
                     invalidationReason = `[阶段四护盘] 移动止损追踪 (回撤阈值5%)`;
                 }
             }
+            else {
+                // If we are holding small position but ROI is small (e.g. just opened 2% equity manually),
+                // we fall through here. We just HOLD.
+                // We also check Maintenance SL for Break Even here.
+            }
 
-            // === SPECIAL MAINTENANCE: SL UPDATE FOR STAGE 2 ===
-            // This runs if we are holding and Ratio indicates Stage 2 has passed (ratio <= 0.85).
-            // It moves SL to Break Even if not already safe.
-            if (finalAction === 'HOLD' && ratio <= 0.85 && netRoi > 0.02) {
-                 const currentSL = parseFloat(p.slTriggerPx || "0");
-                 // Check if SL is "Safe" (Profit Side)
-                 const isSLSafe = isLong ? (currentSL > avgEntry) : (currentSL > 0 && currentSL < avgEntry);
-                 
-                 if (!isSLSafe) {
-                     finalAction = "UPDATE_TPSL";
-                     // Add tiny buffer for fees
-                     const feeBuffer = avgEntry * 0.001; 
-                     finalSL = isLong ? (avgEntry + feeBuffer).toFixed(decimals) : (avgEntry - feeBuffer).toFixed(decimals);
-                     invalidationReason = `[风控] 既然已部分止盈，强制移动止损至保本位`;
+            // === SPECIAL MAINTENANCE: SL UPDATE (Independent of Stage Logic) ===
+            // This ensures ANY profitable trade eventually gets BE protection
+            if (finalAction === 'HOLD' && netRoi > 0.02) {
+                 // Trigger BE move if we are past Stage 1 physically (Ratio < 0.85) OR if ROI is good enough
+                 if (ratio <= 0.85) {
+                     const currentSL = parseFloat(p.slTriggerPx || "0");
+                     const isSLSafe = isLong ? (currentSL > avgEntry) : (currentSL > 0 && currentSL < avgEntry);
+                     
+                     if (!isSLSafe) {
+                         finalAction = "UPDATE_TPSL";
+                         const feeBuffer = avgEntry * 0.001; 
+                         finalSL = isLong ? (avgEntry + feeBuffer).toFixed(decimals) : (avgEntry - feeBuffer).toFixed(decimals);
+                         invalidationReason = `[风控] 既然已部分止盈，强制移动止损至保本位`;
+                     }
                  }
             }
         }
@@ -413,7 +441,7 @@ const analyzeCoin = async (
    - 阶段一(ROI>5%): 平30%。
    - 阶段二(ROI>8%): 再平30%（按初始仓位计） + 并将止损设置跨过盈亏平衡价（持多单向上跨越，持空单向下跨越）。
    - 阶段三(ROI>12%): 再平20%（按初始仓位计）。
-   - 阶段四(尾仓): 实施 5% ROI 的移动止损（Trailing Stop），或在利润回撤至 7% 以下时直接清。
+   - 阶段四(尾仓): 实施 5% ROI 的移动止损（Trailing Stop），或在利润回撤至 7% 以下时直接清仓。
 
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction} (自 ${new Date(trend1H.timestamp).toLocaleTimeString()})   
@@ -489,61 +517,85 @@ const analyzeCoin = async (
             console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
         }
 
-        // --- SIZE CALCULATION (CRITICAL FIX FOR LOT SIZE) ---
+        // --- SIZE CALCULATION REFACTOR (Fix for "Balance Sufficient but Forced Min") ---
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
+            const leverage = parseFloat(DEFAULT_LEVERAGE); 
+            // Correct Margin Calculation: (ContractVal * Price) / Leverage
+            const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
+
+            // Determine if this is an OPEN (Increase) or CLOSE (Reduce) action
+            let isClose = false;
+            if (hasPosition) {
+                const p = primaryPosition!;
+                if (p.posSide === 'long' && finalAction === 'SELL') isClose = true;
+                if (p.posSide === 'short' && finalAction === 'BUY') isClose = true;
+            }
 
             if (finalSize.includes('%')) {
-                // New Rule: 10% of Equity
-                const pct = parseFloat(finalSize) / 100; // 0.10 or 0.50 (for partial close)
-                
+                // Percentage Based (Usually Opening)
+                const pct = parseFloat(finalSize) / 100; 
                 const strategyAmountU = totalEquity * pct;
                 
-                // Safety: 85% of Available (Buffer)
-                const maxAffordableU = availEquity * 0.85; 
-
-                const targetAmountU = Math.min(strategyAmountU, maxAffordableU);
-                
-                const leverage = parseFloat(DEFAULT_LEVERAGE); 
-                const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
-                
-                let rawContracts = targetAmountU / marginPerContract;
-                
-                // --- STRICT INTEGER ENFORCEMENT FOR OKX SWAPS ---
-                // All OKX Swap/Future contracts are integers (sz). 
-                contracts = Math.floor(rawContracts);
-
-                // Check Minimum Size
-                if (contracts < MIN_SZ) {
-                    const costForMin = marginPerContract * MIN_SZ;
-                    // FIX: Remove the buffer (0.98) and use full available equity for the check.
-                    // This solves the issue where small accounts are falsely flagged as insufficient
-                    // when they actually have enough for exactly MIN_SZ.
-                    // OKX API will do the final check, so we shouldn't be stricter than the exchange.
-                    if (availEquity >= costForMin) {
-                        contracts = MIN_SZ;
-                        decision.reasoning += ` [保底交易] 资金量不足${MIN_SZ}张，但余额足够，强制执行最小单位`;
-                    } else {
-                        decision.action = 'HOLD';
-                        decision.size = "0";
-                        decision.reasoning += ` [资金不足] 需 ${costForMin.toFixed(2)}U (Lev:${leverage}), 仅有 ${availEquity.toFixed(2)}U`;
-                        contracts = 0;
-                    }
+                // If Opening: Check Balance
+                // If Closing: Ignore Balance, just calc size
+                if (!isClose) {
+                    const maxAffordableU = availEquity; // USE FULL BALANCE, NO BUFFER (Exchange handles tiny buffers)
+                    const targetAmountU = Math.min(strategyAmountU, maxAffordableU);
+                    contracts = Math.floor(targetAmountU / marginPerContract);
+                } else {
+                    // Closing logic with % (unlikely in this strategy but good for safety)
+                    contracts = Math.floor(strategyAmountU / marginPerContract);
                 }
             } else {
-                // Partial Close (Size is already a number string like "15")
-                // Even for partial close, we must floor it to be safe for API
+                // Fixed Number (Usually Partial Close from Stage Logic)
                 contracts = Math.floor(parseFloat(finalSize));
             }
 
+            // --- MIN SIZE ENFORCEMENT & BALANCE CHECK ---
+            
+            if (contracts < MIN_SZ) {
+                if (isClose) {
+                     // For CLOSE/REDUCE:
+                     // If calculated reduction is 0 (e.g. 30% of 1 contract = 0.3 -> 0),
+                     // BUT we have a position, we should force at least 1 contract close 
+                     // IF the user actually holds >= MIN_SZ.
+                     const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
+                     if (held >= MIN_SZ) {
+                         contracts = MIN_SZ; // Force minimum close to ensure TP happens
+                         decision.reasoning += ` [止盈] 计算量小于最小单位，强制执行最小单位平仓`;
+                     } else {
+                         // We hold less than min size (dust)? Or 0?
+                         // If 0, do nothing. If dust, try to close all.
+                         contracts = Math.floor(held);
+                     }
+                } else {
+                    // For OPEN:
+                    // Only force Min Size if we actually have money for it.
+                    const costForMin = marginPerContract * MIN_SZ;
+                    
+                    // STRICT CHECK: Do we have enough avail equity for MIN_SZ?
+                    if (availEquity >= costForMin) {
+                        contracts = MIN_SZ;
+                        // Only add warning if the STRATEGY wanted less than min, but we boosted it.
+                        // If we are just opening standard min, it's fine.
+                        decision.reasoning += ` [保底交易] 余额充足(${availEquity.toFixed(2)}U >= ${costForMin.toFixed(2)}U)，强制最小开仓`;
+                    } else {
+                        // Truly insufficient
+                        decision.action = 'HOLD';
+                        decision.size = "0";
+                        decision.reasoning += ` [资金不足] 需${costForMin.toFixed(2)}U (Lev:${leverage}x), 余额${availEquity.toFixed(2)}U`;
+                        contracts = 0;
+                    }
+                }
+            }
+
+            // Final Safe-guard
             if (contracts > 0 && decision.action !== 'HOLD') {
                 decision.size = contracts.toString();
-                // --- ENHANCED REASONING: Add Executed Size & Value ---
-                const leverage = parseFloat(DEFAULT_LEVERAGE); 
                 const estimatedValue = (contracts * CONTRACT_VAL * currentPrice).toFixed(2);
-                decision.reasoning += ` [执行细节: ${contracts}张 (约${estimatedValue}U)]`;
-
+                decision.reasoning += ` [拟执行: ${contracts}张 (${estimatedValue}U)]`;
             } else if (decision.action !== 'HOLD') {
                 decision.action = 'HOLD'; 
             }
