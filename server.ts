@@ -85,7 +85,8 @@ const runTradingLoop = async () => {
         if (!marketData || !accountData) return;
 
         // Analyze ALL coins
-        const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData);
+        // Pass logs for action backtracking
+        const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
         
         // Process Each Decision
         for (const decision of decisions) {
