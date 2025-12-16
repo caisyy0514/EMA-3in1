@@ -285,103 +285,110 @@ const analyzeCoin = async (
         
         if (finalAction === 'HOLD') {
             
-            // 计算"估算初始持仓" (Estimated Initial Qty)
+            // 计算"估算初始开仓总量" (Estimated Initial Total Quantity)
             // 公式: (总权益 - 未结盈亏) * 10% * 杠杆 / (入场价 * 合约面值)
             const equityAtEntry = totalEquity - rawUpl;
             const strategyAllocatedEquity = equityAtEntry * 0.10; 
             const estInitialQty = (strategyAllocatedEquity * leverageVal) / (avgEntry * CONTRACT_VAL);
             
-            // Ratio: 当前剩余仓位 / 初始仓位
+            // Ratio: 当前剩余仓位 / 估算初始总量
+            // 假设初始为1.0, 平30%后剩0.7, 再平30%后剩0.4, 再平20%后剩0.2
             const ratio = posSize / estInitialQty;
 
-            // --- STAGE 1 (Full Position) ---
-            // 初始状态，持仓 > 85%
+            // --- STAGE 1 (满仓/高仓位阶段) ---
+            // 剩余仓位 > 85% (即未执行过第一次止盈)
             if (ratio > 0.85) {
-                // Rule: Net ROI >= 5% -> Close 30%
+                // Rule: Net ROI >= 5% -> Close 30% of INITIAL
                 if (netRoi >= 0.05) {
                     finalAction = isLong ? "SELL" : "BUY";
-                    // 平仓量 = 初始仓位 * 30%
+                    // 平仓量 = 初始开仓总量 * 30%
                     finalSize = (estInitialQty * 0.3).toFixed(0); 
-                    invalidationReason = `[阶段一止盈] ROI ${(netRoi*100).toFixed(2)}% ≥ 5% -> 平仓30%`;
+                    invalidationReason = `[阶段一止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 5% -> 平仓初始量的30%`;
                 }
             }
 
-            // --- STAGE 2 (After Stage 1) ---
-            // 持仓在 55% ~ 85% 之间 (已执行过阶段一)
+            // --- STAGE 2 (执行过一次止盈) ---
+            // 剩余仓位在 55% ~ 85% 之间 (理论值0.7)
             else if (ratio > 0.55) { 
                 // Rule 1: Net ROI >= 8% -> Close 30% of INITIAL
                 if (netRoi >= 0.08) {
                     finalAction = isLong ? "SELL" : "BUY";
                     finalSize = (estInitialQty * 0.3).toFixed(0);
-                    invalidationReason = `[阶段二止盈] ROI ${(netRoi*100).toFixed(2)}% ≥ 8% -> 再平30%`;
+                    invalidationReason = `[阶段二止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 8% -> 再平初始量的30%`;
+                    
+                    // 注意：此阶段平仓后，下一步会检查保本损。由于这是并行逻辑，
+                    // 若需要同时平仓和改损，策略引擎会先执行平仓，下一次循环执行改损。
+                    // 或者我们可以假设平仓命令发出后，下一轮循环会进入 "else" 逻辑来设置保本。
                 } 
-                // Rule 2: Force Break Even SL (Mandatory in Stage 2)
-                // 既然处于阶段二，说明阶段一已达成，必须保本
+                // Rule 2: Force Break Even SL (Stage 2 Mandatory)
+                // 既然处于阶段二（说明阶段一已达成），必须将止损调整为开仓成本价
                 else {
                     const currentSL = parseFloat(p.slTriggerPx || "0");
-                    const feeBuffer = avgEntry * 0.002; // 0.2% buffer for fees
+                    const feeBuffer = avgEntry * 0.002; // 0.2% buffer to cover fees safely
                     const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
                     
+                    // Check if SL is secured (Better than or equal to BE)
                     const isSecured = isLong ? (currentSL >= bePrice) : (currentSL > 0 && currentSL <= bePrice);
                     
                     if (!isSecured) {
                         finalAction = "UPDATE_TPSL";
                         finalSL = bePrice.toFixed(decimals);
-                        invalidationReason = `[阶段二风控] 既然已过阶段一，必须设置保本损`;
+                        invalidationReason = `[阶段二风控] 已过阶段一，调整剩余仓位止损至成本价`;
                     }
                 }
             }
 
-            // --- STAGE 3 (After Stage 2) ---
-            // 持仓在 30% ~ 55% 之间 (已执行过阶段二)
+            // --- STAGE 3 (执行过两次止盈) ---
+            // 剩余仓位在 30% ~ 55% 之间 (理论值0.4)
             else if (ratio > 0.30) {
                 // Rule: Net ROI >= 12% -> Close 20% of INITIAL
                 if (netRoi >= 0.12) {
                     finalAction = isLong ? "SELL" : "BUY";
                     finalSize = (estInitialQty * 0.2).toFixed(0);
-                    invalidationReason = `[阶段三止盈] ROI ${(netRoi*100).toFixed(2)}% ≥ 12% -> 再平20% (保留尾仓)`;
+                    invalidationReason = `[阶段三止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 12% -> 再平初始量的20%`;
                 }
-                // (保本损检查在阶段二已执行，若未触发止盈则维持原状)
+                // (保本损已在阶段二设置，保持不变)
             }
 
-            // --- STAGE 4 (Tail / Final) ---
-            // 持仓 <= 30% (已执行过阶段三)
+            // --- STAGE 4 (尾仓阶段) ---
+            // 剩余仓位 <= 30% (理论值0.2)
             else { 
-                // Rule: "In this stage, when net profit retraces more than 5% -> Clear"
-                // Logic: Dynamic Trailing Stop with 5% ROI distance
+                // Rule: Trailing Stop for the remaining 20%
+                // "浮盈最高点回落5%时，即刻市价清仓"
+                // 实现：设置一个动态止损，止损价 = 当前价 - (5% ROI对应的价差)
+                // 随着价格上涨，止损价上移；价格下跌，止损价不变。触及即平。
                 
-                // Calculate 5% ROI worth of price delta
-                const roiDelta = 0.05;
-                const priceDelta = (roiDelta * avgEntry) / leverageVal;
+                // 1. Calculate Price Delta equivalent to 5% ROI
+                const roiGap = 0.05;
+                const priceGap = (roiGap * avgEntry) / leverageVal;
                 
-                // Calculated SL Price based on CURRENT Price
-                let calcSL = isLong ? currentPrice - priceDelta : currentPrice + priceDelta;
+                // 2. Calculate Target SL based on CURRENT price
+                // Long: Price - Gap; Short: Price + Gap
+                let targetSL = isLong ? currentPrice - priceGap : currentPrice + priceGap;
                 
-                // Current Existing SL
+                // 3. Compare with Existing SL
                 const currentSL = parseFloat(p.slTriggerPx || "0");
-                
                 let needUpdate = false;
                 
                 if (isLong) {
-                    // Update if New SL is Higher (Move Up) OR if No SL exists
-                    if (currentSL === 0 || calcSL > currentSL) {
-                        finalSL = calcSL.toFixed(decimals);
+                    // Update if Target SL is higher than Current SL (Ratchet up) OR if no SL
+                    if (currentSL === 0 || targetSL > currentSL) {
+                        // Ensure we don't set SL above current price (instant trigger) - though logic implies we track below
+                        finalSL = targetSL.toFixed(decimals);
                         needUpdate = true;
                     } 
                 } else {
-                    // Update if New SL is Lower (Move Down) OR if No SL exists
-                    if (currentSL === 0 || calcSL < currentSL) {
-                        finalSL = calcSL.toFixed(decimals);
+                    // Update if Target SL is lower than Current SL (Ratchet down) OR if no SL
+                    if (currentSL === 0 || targetSL < currentSL) {
+                        finalSL = targetSL.toFixed(decimals);
                         needUpdate = true;
                     }
                 }
                 
                 if (needUpdate) {
                     finalAction = "UPDATE_TPSL";
-                    invalidationReason = `[阶段四护盘] 尾仓追踪: 保持5% ROI回撤距离 (当前价${isLong?'-':'+'}5%收益)`;
+                    invalidationReason = `[阶段四护盘] 尾仓追踪: 设置回撤5%止损 (当前ROI ${(netRoi*100).toFixed(2)}%)`;
                 }
-                
-                // Note: Clearing the position is handled by the Exchange Triggering this SL.
             }
         }
 
@@ -404,11 +411,11 @@ const analyzeCoin = async (
 
 **核心原则**:
 1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。
-2. **多阶段止盈 (严格顺序)**:
-   - 阶段一(满仓): ROI≥5% 平30%。
-   - 阶段二(剩余<85%): ROI≥8% 平30% + 移动止损至保本。
-   - 阶段三(剩余<55%): ROI≥12% 平20%。
-   - 阶段四(尾仓<30%): 实施5% ROI间距的移动止损，回撤即清仓。
+2. **多阶段止盈 (基于初始开仓总量)**:
+   - 阶段一(满仓): ROI≥5% 平初始量的30%。
+   - 阶段二(余~70%): ROI≥8% 平初始量的30% + 移动止损至成本价。
+   - 阶段三(余~40%): ROI≥12% 平初始量的20%。
+   - 阶段四(余~20%): 尾仓设置动态追踪止损，从高点回撤5%ROI即清仓。
 
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction}
@@ -426,7 +433,7 @@ const analyzeCoin = async (
 **输出要求**:
 1. 返回格式必须为 JSON。
 2. **market_assessment**: 包含【1H趋势】和【3m入场】的中文描述。
-3. **reasoning**: 解释阶段判断逻辑。
+3. **reasoning**: 解释阶段判断逻辑，明确当前止盈阶段。
 4. 根据 "建议动作" 生成最终 JSON。
 `;
 
