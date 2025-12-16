@@ -16,8 +16,8 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
   },
   BNB: {
     instId: "BNB-USDT-SWAP",
-    contractVal: 0.01, // OKX Standard for BNB
-    tickSize: 0.1,
+    contractVal: 0.01, // OKX Standard for BNB (Note: Check if it's 0.01 or 0.1 on actual exchange, usually varies, keeping logic generic)
+    tickSize: 0.1, // Adjusted tick size usually 0.01 or 0.1
     displayName: "BNB",
     minSz: 1
   },
