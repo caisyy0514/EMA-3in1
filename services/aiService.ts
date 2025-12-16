@@ -283,7 +283,7 @@ const analyzeCoin = async (
             invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})，强制平仓`;
         }
 
-        // === 2. SEQUENTIAL TAKE PROFIT & TRAILING STOP (Backtracking Logic) ===
+        // === 2. SEQUENTIAL TAKE PROFIT (Merged Execution) & TRAILING STOP ===
         
         if (finalAction === 'HOLD') {
             
@@ -293,46 +293,52 @@ const analyzeCoin = async (
             const strategyAllocatedEquity = equityAtEntry * 0.10; 
             const estInitialQty = (strategyAllocatedEquity * leverageVal) / (avgEntry * CONTRACT_VAL);
             
-            // --- ACTION BACKTRACKING STAGE DETERMINATION ---
-            // 依据日志回溯确定当前处于哪个阶段
-            let currentStage = 1;
-
-            // Filter logs related to this coin AND occurred AFTER position creation
+            // --- ACTION BACKTRACKING & CUMULATIVE TP ---
+            // 检查历史日志，确定哪些阶段已完成
             const relevantLogs = logs.filter(log => {
-                return log.timestamp.getTime() > posCreationTime && log.message.includes(`[${coinKey}]`);
+                return log.timestamp.getTime() > posCreationTime && log.message.includes(`[${coinKey}]`) && log.type === 'TRADE';
             });
 
-            const hasStage1TP = relevantLogs.some(l => l.message.includes("阶段一止盈") && l.type === 'TRADE'); // Check TRADE type to ensure execution
-            const hasStage2TP = relevantLogs.some(l => l.message.includes("阶段二止盈") && l.type === 'TRADE');
-            const hasStage3TP = relevantLogs.some(l => l.message.includes("阶段三止盈") && l.type === 'TRADE');
+            const hasStage1 = relevantLogs.some(l => l.message.includes("阶段一"));
+            const hasStage2 = relevantLogs.some(l => l.message.includes("阶段二"));
+            const hasStage3 = relevantLogs.some(l => l.message.includes("阶段三"));
 
-            if (hasStage3TP) currentStage = 4;
-            else if (hasStage2TP) currentStage = 3;
-            else if (hasStage1TP) currentStage = 2;
-            else currentStage = 1;
+            let pendingCloseRatio = 0;
+            let hitStages: string[] = [];
 
-            // --- STAGE EXECUTION ---
-
-            // --- STAGE 1 (满仓阶段) ---
-            if (currentStage === 1) {
-                // Rule: Net ROI >= 5% -> Close 30% of INITIAL
-                if (netRoi >= 0.05) {
-                    finalAction = isLong ? "SELL" : "BUY";
-                    finalSize = (estInitialQty * 0.3).toFixed(0); 
-                    invalidationReason = `[阶段一止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 5% -> 平仓初始量的30%`;
-                }
+            // Stage 1 Check: ROI >= 5%
+            if (netRoi >= 0.05 && !hasStage1) {
+                pendingCloseRatio += 0.30;
+                hitStages.push("一");
             }
 
-            // --- STAGE 2 (执行过一次止盈) ---
-            else if (currentStage === 2) { 
-                // Rule 1: Net ROI >= 8% -> Close 30% of INITIAL
-                if (netRoi >= 0.08) {
-                    finalAction = isLong ? "SELL" : "BUY";
-                    finalSize = (estInitialQty * 0.3).toFixed(0);
-                    invalidationReason = `[阶段二止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 8% -> 再平初始量的30%`;
-                } 
-                // Rule 2: Force Break Even SL (Stage 2 Mandatory)
-                else {
+            // Stage 2 Check: ROI >= 8%
+            if (netRoi >= 0.08 && !hasStage2) {
+                pendingCloseRatio += 0.30;
+                hitStages.push("二");
+            }
+
+            // Stage 3 Check: ROI >= 12%
+            if (netRoi >= 0.12 && !hasStage3) {
+                pendingCloseRatio += 0.20;
+                hitStages.push("三");
+            }
+
+            // --- EXECUTE MERGED CLOSING ---
+            if (pendingCloseRatio > 0) {
+                finalAction = isLong ? "SELL" : "BUY";
+                // Calculate accumulated quantity
+                const targetQty = estInitialQty * pendingCloseRatio;
+                finalSize = targetQty.toFixed(0); 
+                invalidationReason = `[多阶止盈合并] 同时满足阶段${hitStages.join('+')} (ROI ${(netRoi*100).toFixed(2)}%) -> 合并平仓初始量的 ${(pendingCloseRatio*100).toFixed(0)}%`;
+            } 
+            else {
+                // --- MAINTENANCE LOGIC (Update TP/SL) ---
+                // 只有在不需要平仓时，才进行止损调整，避免动作冲突
+
+                // Rule: If Stage 1 passed (either just now or historically), Check Break Even
+                // Using (hasStage1 || netRoi >= 0.05) to be safe
+                if (hasStage1 || netRoi >= 0.05) {
                     const currentSL = parseFloat(p.slTriggerPx || "0");
                     const feeBuffer = avgEntry * 0.002;
                     const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
@@ -342,53 +348,43 @@ const analyzeCoin = async (
                     if (!isSecured) {
                         finalAction = "UPDATE_TPSL";
                         finalSL = bePrice.toFixed(decimals);
-                        invalidationReason = `[阶段二风控] 已过阶段一，调整剩余仓位止损至成本价`;
+                        invalidationReason = `[阶段二风控] 利润回撤保护: 调整止损至成本价`;
                     }
                 }
-            }
 
-            // --- STAGE 3 (执行过两次止盈) ---
-            else if (currentStage === 3) {
-                // Rule: Net ROI >= 12% -> Close 20% of INITIAL
-                if (netRoi >= 0.12) {
-                    finalAction = isLong ? "SELL" : "BUY";
-                    finalSize = (estInitialQty * 0.2).toFixed(0);
-                    invalidationReason = `[阶段三止盈] 净ROI ${(netRoi*100).toFixed(2)}% ≥ 12% -> 再平初始量的20%`;
-                }
-                // (保本损已在阶段二设置)
-            }
-
-            // --- STAGE 4 (尾仓阶段) ---
-            else if (currentStage === 4) { 
-                // Rule: Trailing Stop for the remaining 20%
-                // 1. Calculate Price Delta equivalent to 5% ROI
-                const roiGap = 0.05;
-                const priceGap = (roiGap * avgEntry) / leverageVal;
-                
-                // 2. Calculate Target SL based on CURRENT price
-                let targetSL = isLong ? currentPrice - priceGap : currentPrice + priceGap;
-                
-                // 3. Compare with Existing SL
-                const currentSL = parseFloat(p.slTriggerPx || "0");
-                let needUpdate = false;
-                
-                if (isLong) {
-                    // Update if Target SL is higher than Current SL
-                    if (currentSL === 0 || targetSL > currentSL) {
-                        finalSL = targetSL.toFixed(decimals);
-                        needUpdate = true;
-                    } 
-                } else {
-                    // Update if Target SL is lower than Current SL
-                    if (currentSL === 0 || targetSL < currentSL) {
-                        finalSL = targetSL.toFixed(decimals);
-                        needUpdate = true;
+                // Rule: If Stage 3 passed (Tail Position), Check Trailing Stop
+                // Using (hasStage3 || netRoi >= 0.12)
+                if (hasStage3 || netRoi >= 0.12) {
+                     // Trailing Stop for the remaining 20%
+                    // 1. Calculate Price Delta equivalent to 5% ROI
+                    const roiGap = 0.05;
+                    const priceGap = (roiGap * avgEntry) / leverageVal;
+                    
+                    // 2. Calculate Target SL based on CURRENT price
+                    let targetSL = isLong ? currentPrice - priceGap : currentPrice + priceGap;
+                    
+                    // 3. Compare with Existing SL
+                    const currentSL = parseFloat(p.slTriggerPx || "0");
+                    let needUpdate = false;
+                    
+                    if (isLong) {
+                        // Update if Target SL is higher than Current SL
+                        if (currentSL === 0 || targetSL > currentSL) {
+                            finalSL = targetSL.toFixed(decimals);
+                            needUpdate = true;
+                        } 
+                    } else {
+                        // Update if Target SL is lower than Current SL
+                        if (currentSL === 0 || targetSL < currentSL) {
+                            finalSL = targetSL.toFixed(decimals);
+                            needUpdate = true;
+                        }
                     }
-                }
-                
-                if (needUpdate) {
-                    finalAction = "UPDATE_TPSL";
-                    invalidationReason = `[阶段四护盘] 尾仓追踪: 设置回撤5%止损 (当前ROI ${(netRoi*100).toFixed(2)}%)`;
+                    
+                    if (needUpdate) {
+                        finalAction = "UPDATE_TPSL";
+                        invalidationReason = `[阶段四护盘] 尾仓追踪: 设置回撤5%止损 (当前ROI ${(netRoi*100).toFixed(2)}%)`;
+                    }
                 }
             }
         }
@@ -434,7 +430,7 @@ const analyzeCoin = async (
 **输出要求**:
 1. 返回格式必须为 JSON。
 2. **market_assessment**: 包含【1H趋势】和【3m入场】的中文描述。
-3. **reasoning**: 解释阶段判断逻辑，明确当前所属的止盈阶段。
+3. **reasoning**: 解释阶段判断逻辑。
 4. 根据 "建议动作" 生成最终 JSON。
 `;
 
@@ -498,79 +494,100 @@ const analyzeCoin = async (
             
             let contracts = 0;
             const leverage = parseFloat(DEFAULT_LEVERAGE); 
+            // OKX Margin = (Quantity * ContractVal * Price) / Leverage
             const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
+            const minMarginRequired = marginPerContract * MIN_SZ;
 
             // Determine if this is an OPEN (Increase) or CLOSE (Reduce) action
             let isClose = false;
+            // Simplified check: If we have a position and action opposes it -> Close. 
+            // If we have position and action matches -> Add (Open).
+            // If no position -> Open.
             if (hasPosition) {
                 const p = primaryPosition!;
                 if (p.posSide === 'long' && finalAction === 'SELL') isClose = true;
                 if (p.posSide === 'short' && finalAction === 'BUY') isClose = true;
             }
 
-            if (finalSize.includes('%')) {
-                // Percentage Based (Usually Opening)
-                const pct = parseFloat(finalSize) / 100; 
-                const strategyAmountU = totalEquity * pct;
-                
-                if (!isClose) {
-                    // STRICT BALANCE CHECK FOR OPENING
-                    // 1. Calculate ideal contract size based on Strategy
-                    contracts = Math.floor(strategyAmountU / marginPerContract);
-                    const costForIdeal = contracts * marginPerContract;
+            let calcDetails = "";
 
-                    // 2. Check if we can afford the ideal size
-                    if (availEquity >= costForIdeal) {
-                        // We can afford it, proceed with calculated contracts
-                        // If calculated contracts < MIN_SZ, that's a strategy constraint, handled below
-                    } else {
-                        // We cannot afford ideal size, scale down to max affordable
-                        contracts = Math.floor(availEquity / marginPerContract);
-                    }
+            if (!isClose) {
+                // === NEW STRICT OPENING GUARANTEE MECHANISM ===
+                
+                // 1. Calculate Target Strategy Size
+                let targetContracts = 0;
+                
+                if (finalSize.includes('%')) {
+                    const pct = parseFloat(finalSize) / 100; 
+                    // Strategy Amount in USDT (Margin allocation)
+                    const strategyMarginAlloc = totalEquity * pct;
+                    targetContracts = Math.floor(strategyMarginAlloc / marginPerContract);
                 } else {
-                    contracts = Math.floor(strategyAmountU / marginPerContract);
+                    targetContracts = Math.floor(parseFloat(finalSize));
+                }
+
+                const targetMargin = targetContracts * marginPerContract;
+
+                // 2. Strict Check & Guarantee Logic
+                // Log the calculation variables
+                const openValUSDT = targetContracts * CONTRACT_VAL * currentPrice;
+                calcDetails = `[决策测算] 目标: ${targetContracts}张 (合约价值${openValUSDT.toFixed(1)}U), 杠杆: ${leverage}x, 需保证金: ${targetMargin.toFixed(2)}U, 可用: ${availEquity.toFixed(2)}U`;
+
+                if (availEquity >= targetMargin && targetContracts >= MIN_SZ) {
+                    // [Normal] Funds sufficient AND Size >= Min
+                    contracts = targetContracts;
+                    calcDetails += ` -> [资金充足] 按策略执行`;
+                } else {
+                    // [Exception] Funds Insufficient OR Size < Min
+                    // Strictly check if Min Size is affordable
+                    if (availEquity >= minMarginRequired) {
+                         contracts = MIN_SZ;
+                         const reason = availEquity < targetMargin ? "余额不足策略量" : "策略量小于最小单位";
+                         calcDetails += ` -> [保底触发] ${reason}, 严谨执行最小开仓(${MIN_SZ}张, 需${minMarginRequired.toFixed(2)}U)`;
+                    } else {
+                         // [Fail] Not enough for even Min Size
+                         contracts = 0;
+                         decision.action = 'HOLD';
+                         calcDetails += ` -> [资金不足] 无法满足最小保底保证金(${minMarginRequired.toFixed(2)}U), 放弃开仓`;
+                    }
                 }
             } else {
-                // Fixed Number (Usually Partial Close from Stage Logic)
+                // === CLOSING LOGIC (Standard) ===
+                // Parse the size decided by strategy (e.g. "30" from "30% of initial")
                 contracts = Math.floor(parseFloat(finalSize));
-            }
-
-            // --- MIN SIZE ENFORCEMENT & BALANCE CHECK ---
-            
-            if (contracts < MIN_SZ) {
-                if (isClose) {
-                     // For CLOSE/REDUCE:
-                     const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
-                     if (held >= MIN_SZ) {
-                         contracts = MIN_SZ; 
-                         decision.reasoning += ` [止盈] 计算量小于最小单位，强制执行最小单位平仓`;
-                     } else {
-                         contracts = Math.floor(held); // Close dust
-                     }
-                } else {
-                    // For OPEN:
-                    // Check if we can afford MIN_SZ
-                    const costForMin = marginPerContract * MIN_SZ;
-                    
-                    if (availEquity >= costForMin) {
-                        contracts = MIN_SZ;
-                        decision.reasoning += ` [保底交易] 策略仓位不足最小单位，强制最小开仓`;
-                    } else {
-                        decision.action = 'HOLD';
-                        decision.size = "0";
-                        decision.reasoning += ` [资金不足] 需${costForMin.toFixed(2)}U, 余额${availEquity.toFixed(2)}U`;
-                        contracts = 0;
+                
+                // Safety check: Don't close more than held
+                const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
+                
+                if (contracts < MIN_SZ) {
+                    // Prevent dust closing errors if API rejects < 1
+                    // If we hold >= MIN_SZ, force at least MIN_SZ close to ensure execution?
+                    // Or if held < MIN_SZ (dust), close all.
+                    if (held < MIN_SZ) {
+                        contracts = Math.floor(held); // Close dust
+                    } else if (contracts > 0) {
+                        contracts = MIN_SZ; // Round up to min size
                     }
                 }
+                
+                if (contracts > held) contracts = Math.floor(held);
+                calcDetails = `[平仓执行] 计划平: ${contracts}张, 持仓: ${held}张`;
             }
 
-            // Final Safe-guard
+            // 3. Finalize Decision
             if (contracts > 0 && decision.action !== 'HOLD') {
                 decision.size = contracts.toString();
-                const estimatedValue = (contracts * CONTRACT_VAL * currentPrice).toFixed(2);
-                decision.reasoning += ` [拟执行: ${contracts}张 (${estimatedValue}U)]`;
-            } else if (decision.action !== 'HOLD') {
-                decision.action = 'HOLD'; 
+                // Append detailed calculation to reasoning
+                decision.reasoning += ` || ${calcDetails}`;
+                
+                // Update structured data for "Checkability"
+                if (decision.trading_decision) {
+                    decision.trading_decision.position_size = contracts.toString();
+                }
+            } else if (decision.action !== 'HOLD' && !isClose) {
+                // Action cancelled due to funds
+                decision.action = 'HOLD';
+                decision.reasoning += ` || ${calcDetails}`;
             }
         }
 
