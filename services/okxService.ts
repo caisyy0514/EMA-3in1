@@ -407,6 +407,40 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     }
 };
 
+// Check and cancel orphaned algos (Cleanup logic)
+export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) => {
+   if (config.isSimulation) return 0;
+   try {
+       // 1. Fetch pending algos
+       const algos = await fetchAlgoOrders(instId, config);
+       if (!algos || algos.length === 0) return 0;
+
+       // 2. Identify Orphans 
+       // If this function is called, it means there is NO position.
+       // So any 'reduceOnly' algo order is definitely an orphan (conditional close, trailing stop).
+       // OKX API returns reduceOnly as string "true" or "false"
+       const orphans = algos.filter((o: any) => 
+           (o.ordType === 'conditional' || o.ordType === 'move_order_stop' || o.ordType === 'oco') &&
+           o.reduceOnly === 'true'
+       );
+       
+       if (orphans.length > 0) {
+           console.log(`[Cleanup] Found ${orphans.length} orphaned algos for ${instId}. Cancelling...`);
+           const toCancel = orphans.map((o: any) => ({ algoId: o.algoId, instId }));
+           
+           const path = "/api/v5/trade/cancel-algos";
+           const body = JSON.stringify(toCancel);
+           const headers = getHeaders('POST', path, body, config);
+           await fetch(BASE_URL + path, { method: 'POST', headers: headers, body: body });
+           return orphans.length;
+       }
+       return 0;
+   } catch (e: any) {
+       console.error(`Failed to cleanup orphans for ${instId}:`, e.message);
+       return 0;
+   }
+};
+
 export const executeOrder = async (order: AIDecision, config: any): Promise<any> => {
   if (config.isSimulation) {
     console.log(`[${order.coin}] SIMULATION: Executing Order`, order);
@@ -587,7 +621,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
                 errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             }
             if (actualCode === '51008') {
-                errorMsg = "余额不足 (51008): 账户可用资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
+                errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
             }
             throw new Error(errorMsg);
         }
