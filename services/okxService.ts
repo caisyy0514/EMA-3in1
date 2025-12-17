@@ -587,7 +587,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
                 errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             }
             if (actualCode === '51008') {
-                errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
+                errorMsg = "余额不足 (51008): 账户可用资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
             }
             throw new Error(errorMsg);
         }
