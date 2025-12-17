@@ -362,6 +362,14 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
 
     const placeTrailing = async (activationPx: string, sz: number) => {
         if (sz < MIN_SZ) return;
+        
+        // FIX: Calculate callback based on ROI 5% -> Price Change %
+        // ROI 5% = PriceChange% * Leverage
+        // PriceChange% = 0.05 / Leverage
+        const roiCallback = 0.05;
+        const priceCallbackRatio = roiCallback / leverage;
+        const callbackRatioStr = priceCallbackRatio.toFixed(5); // Ensure enough precision
+
         const body = JSON.stringify({
             instId,
             tdMode: 'isolated',
@@ -370,7 +378,7 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
             ordType: 'move_order_stop',
             sz: sz.toString(),
             reduceOnly: true,
-            callbackRatio: "0.05", // 5% Callback
+            callbackRatio: callbackRatioStr, 
             activePx: activationPx // Activate at Stage 3 Price
         });
         const headers = getHeaders('POST', algoPath, body, config);
