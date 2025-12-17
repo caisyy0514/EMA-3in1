@@ -367,8 +367,15 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
         // ROI 5% = PriceChange% * Leverage
         // PriceChange% = 0.05 / Leverage
         const roiCallback = 0.05;
-        const priceCallbackRatio = roiCallback / leverage;
-        const callbackRatioStr = priceCallbackRatio.toFixed(5); // Ensure enough precision
+        const rawPriceCallback = roiCallback / leverage;
+        
+        // CONSTRAINT: Exchange only supports 0.1% step (0.001 precision)
+        // We floor it to 3 decimal places to be compatible (e.g. 0.0025 -> 0.002)
+        // Ensure minimum is 0.001 (0.1%)
+        const flooredCallback = Math.floor(rawPriceCallback * 1000) / 1000;
+        const finalCallback = Math.max(0.001, flooredCallback);
+        
+        const callbackRatioStr = finalCallback.toFixed(3); 
 
         const body = JSON.stringify({
             instId,
