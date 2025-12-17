@@ -127,7 +127,7 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco`;
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -268,6 +268,130 @@ const ensureLongShortMode = async (config: any) => {
     }
 };
 
+// Fetch order details to get avgPx
+const getOrderDetails = async (instId: string, ordId: string, config: any) => {
+    const path = `/api/v5/trade/order?instId=${instId}&ordId=${ordId}`;
+    const headers = getHeaders('GET', path, '', config);
+    const res = await fetch(BASE_URL + path, { method: 'GET', headers: headers });
+    const json = await res.json();
+    if (json.code === '0' && json.data && json.data.length > 0) {
+        return json.data[0];
+    }
+    throw new Error(`无法获取订单详情: ${json.msg}`);
+};
+
+// Place Segmented Algo Strategy
+const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string, totalSz: string, config: any) => {
+    if (config.isSimulation) return;
+    
+    console.log(`[Strategy] Placing segmented TPs for ${instId} ${posSide}, Entry: ${avgPx}, Size: ${totalSz}`);
+
+    const entryPrice = parseFloat(avgPx);
+    const size = parseFloat(totalSz);
+    
+    // Find Coin Config for minSz and contractVal
+    const coinKey = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId);
+    if (!coinKey) return;
+    const coinConf = COIN_CONFIG[coinKey];
+    const MIN_SZ = coinConf.minSz;
+    const TICK_SIZE = coinConf.tickSize;
+    const leverage = parseFloat(DEFAULT_LEVERAGE);
+
+    // Helper for formatting price
+    const fmtPrice = (p: number) => {
+        // Simple fix for precision based on tickSize
+        const decimals = TICK_SIZE < 0.01 ? 4 : 2; 
+        // Or more robust implementation using tickSize
+        return p.toFixed(decimals);
+    };
+
+    // Calculate TP Prices
+    // Long: Price = Entry * (1 + ROI/Lev)
+    // Short: Price = Entry * (1 - ROI/Lev)
+    const getTpPrice = (roi: number) => {
+        if (posSide === 'long') return entryPrice * (1 + roi / leverage);
+        return entryPrice * (1 - roi / leverage);
+    };
+
+    const p1 = fmtPrice(getTpPrice(0.05)); // 5%
+    const p2 = fmtPrice(getTpPrice(0.08)); // 8%
+    const p3 = fmtPrice(getTpPrice(0.12)); // 12%
+
+    // Calculate Quantities (Quantized)
+    const q1Raw = size * 0.30;
+    const q2Raw = size * 0.30;
+    const q3Raw = size * 0.20;
+    
+    // Quantize function
+    const quantize = (s: number) => {
+        const val = Math.floor(s / MIN_SZ) * MIN_SZ;
+        // Fix float precision
+        const prec = MIN_SZ.toString().split('.')[1]?.length || 0;
+        return parseFloat(val.toFixed(prec));
+    };
+
+    const q1 = quantize(q1Raw);
+    const q2 = quantize(q2Raw);
+    const q3 = quantize(q3Raw);
+    
+    // Q4 is remainder
+    let q4 = size - q1 - q2 - q3;
+    const prec = MIN_SZ.toString().split('.')[1]?.length || 0;
+    q4 = parseFloat(q4.toFixed(prec));
+
+    // Prepare Algo Orders
+    const algoPath = "/api/v5/trade/order-algo";
+    const side = posSide === 'long' ? 'sell' : 'buy'; // Close side
+
+    const placeConditional = async (triggerPx: string, sz: number) => {
+        if (sz < MIN_SZ) return;
+        const body = JSON.stringify({
+            instId,
+            tdMode: 'isolated',
+            side,
+            posSide,
+            ordType: 'conditional',
+            sz: sz.toString(),
+            reduceOnly: true,
+            tpTriggerPx: triggerPx,
+            tpOrdPx: '-1' // Market Close
+        });
+        const headers = getHeaders('POST', algoPath, body, config);
+        await fetch(BASE_URL + algoPath, { method: 'POST', headers, body });
+    };
+
+    const placeTrailing = async (activationPx: string, sz: number) => {
+        if (sz < MIN_SZ) return;
+        const body = JSON.stringify({
+            instId,
+            tdMode: 'isolated',
+            side,
+            posSide,
+            ordType: 'move_order_stop',
+            sz: sz.toString(),
+            reduceOnly: true,
+            callbackRatio: "0.05", // 5% Callback
+            activePx: activationPx // Activate at Stage 3 Price
+        });
+        const headers = getHeaders('POST', algoPath, body, config);
+        await fetch(BASE_URL + algoPath, { method: 'POST', headers, body });
+    };
+
+    // Execute Placements (Parallel)
+    const promises = [];
+    if (q1 >= MIN_SZ) promises.push(placeConditional(p1, q1));
+    if (q2 >= MIN_SZ) promises.push(placeConditional(p2, q2));
+    if (q3 >= MIN_SZ) promises.push(placeConditional(p3, q3));
+    if (q4 >= MIN_SZ) promises.push(placeTrailing(p3, q4)); // Activate trailing at P3
+
+    try {
+        await Promise.all(promises);
+        console.log("Algo Strategy Placed Successfully");
+    } catch (e) {
+        console.error("Failed to place algo strategy", e);
+    }
+};
+
 export const executeOrder = async (order: AIDecision, config: any): Promise<any> => {
   if (config.isSimulation) {
     console.log(`[${order.coin}] SIMULATION: Executing Order`, order);
@@ -388,11 +512,8 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
     const initialSizeStr = sizeFloat.toFixed(2);
     
     // Check TPs and SLs once to pass into recursive function
-    const tpPrice = order.trading_decision?.profit_target;
     const slPrice = order.trading_decision?.stop_loss;
     const cleanPrice = (p: string | undefined) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0 ? p : null;
-
-    const validTp = cleanPrice(tpPrice);
     const validSl = cleanPrice(slPrice);
 
     // Recursive Order Placement for Automatic Retries on 51008
@@ -407,18 +528,13 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
             reduceOnly: reduceOnly
         };
 
-        if ((validTp || validSl) && !reduceOnly) {
-            // Only attach TP/SL if we are NOT purely closing (reduceOnly)
-            // OKX sometimes rejects attaching algos to reduceOnly orders depending on mode
+        if (validSl && !reduceOnly) {
+            // Only attach SL if we are NOT purely closing (reduceOnly)
+            // Note: We DO NOT attach TP here anymore, as we use segmented TP strategy later
             const algoOrder: any = {};
-            if (validTp) {
-                algoOrder.tpTriggerPx = validTp;
-                algoOrder.tpOrdPx = '-1'; // Market close
-            }
-            if (validSl) {
-                algoOrder.slTriggerPx = validSl;
-                algoOrder.slOrdPx = '-1'; // Market close
-            }
+            // Attach SL
+            algoOrder.slTriggerPx = validSl;
+            algoOrder.slOrdPx = '-1'; // Market close
             bodyObj.attachAlgoOrds = [algoOrder];
         }
         
@@ -429,7 +545,6 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         const json = await response.json();
 
         // FIX: Extract the actual error code from data if the top-level code is '1'
-        // OKX V5 uses code '1' for "Operation failed" and puts details in data array
         const actualCode = (json.code === '1' && json.data && json.data.length > 0 && json.data[0].sCode) 
                             ? json.data[0].sCode 
                             : json.code;
@@ -443,25 +558,19 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
             // Check if reduced size is still valid (>= 0.01)
             if (parseFloat(reduced) >= 0.01) {
                 return placeOrderWithRetry(reduced, retries - 1);
-            } else {
-                 console.warn("Reduced size too small, aborting retry.");
             }
         }
 
         if (json.code !== '0') {
             let errorMsg = `Code ${json.code}: ${json.msg}`;
-            
-            // Detailed error reporting
             if (json.data && json.data.length > 0) {
                  const d = json.data[0];
-                 // If sMsg exists, append it
                  if (d.sMsg) errorMsg += ` (sMsg: ${d.sMsg})`;
                  else if (d.sCode) errorMsg += ` (sCode: ${d.sCode})`;
                  else errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             } else if (json.data) {
                 errorMsg += ` (Data: ${JSON.stringify(json.data)})`;
             }
-
             if (actualCode === '51008') {
                 errorMsg = "余额不足 (51008): 账户资金无法支付开仓保证金(已自动重试降低仓位但仍失败)。";
             }
@@ -470,7 +579,39 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         return json;
     };
 
-    return await placeOrderWithRetry(initialSizeStr, 2); // Try up to 2 times (Initial + 2 retries = 3 attempts total approx)
+    const orderRes = await placeOrderWithRetry(initialSizeStr, 2); 
+
+    // --- AUTOMATIC ALGO STRATEGY PLACEMENT ---
+    // If this was an OPEN order (not reduceOnly), we must now place the segmented TP orders
+    if (!reduceOnly && orderRes.code === '0') {
+        const ordId = orderRes.data?.[0]?.ordId;
+        if (ordId) {
+            // Short delay to ensure order is processed/fill is available
+            await new Promise(r => setTimeout(r, 800));
+            try {
+                // Fetch filled details to get exact average price
+                const orderDetails = await getOrderDetails(targetInstId, ordId, config);
+                const avgPx = orderDetails.avgPx || orderDetails.fillPx; // Fill price
+                
+                if (avgPx && parseFloat(avgPx) > 0) {
+                    // Place the segmented TP strategy
+                    // Note: We use the 'currentSz' that was actually sent (available in orderDetails.sz) 
+                    // in case retries reduced it.
+                    const finalSize = orderDetails.sz || initialSizeStr;
+                    
+                    await placeAlgoStrategy(targetInstId, apiPosSide, avgPx, finalSize, config);
+                } else {
+                    console.warn(`Order ${ordId} filled but avgPx invalid or zero.`);
+                }
+            } catch (e: any) {
+                console.error("Failed to place post-order algo strategy:", e.message);
+                // We do not fail the main execution promise here, as the position is already open.
+                // Just log the error.
+            }
+        }
+    }
+
+    return orderRes;
 
   } catch (error: any) {
       console.error(`Trade execution failed for ${targetInstId}:`, error);
@@ -488,9 +629,23 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
         // 1. Fetch existing algo orders (Pre-fetch to know what to cancel later)
         const pendingAlgos = await fetchAlgoOrders(instId, config);
         
-        const toCancel = pendingAlgos
-            .filter((o: any) => o.instId === instId && o.posSide === posSide)
-            .map((o: any) => ({ algoId: o.algoId, instId }));
+        // Filter SL algos to update (We usually don't want to cancel the Segmented TPs we just placed)
+        // If tpPrice is provided (Manual override?), we might cancel TPs. 
+        // But in this automated flow, we are mainly updating SL.
+        
+        const toCancel = [];
+        
+        if (slPrice) {
+            // Cancel existing SLs
+            const existingSLs = pendingAlgos.filter((o: any) => o.instId === instId && o.posSide === posSide && o.slTriggerPx && parseFloat(o.slTriggerPx) > 0);
+            existingSLs.forEach((o: any) => toCancel.push({ algoId: o.algoId, instId }));
+        }
+        
+        if (tpPrice) {
+            // Cancel existing TPs if we are setting a new single TP (Unlikely in this new flow)
+             const existingTPs = pendingAlgos.filter((o: any) => o.instId === instId && o.posSide === posSide && o.tpTriggerPx && parseFloat(o.tpTriggerPx) > 0);
+             existingTPs.forEach((o: any) => toCancel.push({ algoId: o.algoId, instId }));
+        }
 
         // 2. Place new Algo Order (Conditional Close) FIRST
         if (slPrice || tpPrice) {
