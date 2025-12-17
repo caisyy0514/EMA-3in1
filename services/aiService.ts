@@ -305,7 +305,10 @@ const analyzeCoin = async (
             if (netRoi >= 0.08) {
                 const currentSL = parseFloat(p.slTriggerPx || "0");
                 const feeBuffer = avgEntry * 0.002;
-                const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
+                
+                // FIX: Normalize bePrice precision to prevent infinite update loop due to float diff
+                let bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
+                bePrice = parseFloat(bePrice.toFixed(decimals)); 
                 
                 const isSecured = isLong ? (currentSL >= bePrice) : (currentSL > 0 && currentSL <= bePrice);
                 
@@ -328,7 +331,7 @@ const analyzeCoin = async (
         // 保持原有的开仓判断不变: 3m 趋势下前一个反向交叉区间的极值
         if (entry3m.signal) {
             finalAction = entry3m.action;
-            finalSize = "10%"; // Rule: 10% of Total Account
+            finalSize = "15%"; // Rule: 15% of Total Account (Upgraded from 10%)
             finalSL = entry3m.sl.toFixed(decimals); 
             invalidationReason = `[开仓] 3m策略信号触发, 止损设为前一交叉极值(${finalSL})`;
         }
@@ -349,7 +352,7 @@ const analyzeCoin = async (
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction}
 2. **3m 入场**: ${entry3m.structure}
-3. **资金**: 10% 权益。
+3. **资金**: 15% 权益。
 4. **开仓止损**: 3m 趋势下前一个反向交叉区间的极值。
 
 **当前状态**:
