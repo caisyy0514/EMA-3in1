@@ -31,6 +31,11 @@ let lastAnalysisTime = 0;
 // Fetching lock to prevent race conditions due to network delay
 let isProcessing = false;
 
+// --- Cleanup State ---
+let previousActiveInstIds: Set<string> = new Set();
+let lastCleanupTime = 0;
+const CLEANUP_INTERVAL = 60 * 1000; // 1 Minute
+
 // Helper to add logs
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
@@ -59,6 +64,41 @@ const runTradingLoop = async () => {
             if (isRunning) addLog('ERROR', `数据同步失败: ${e.message}`);
             // If data fetch fails, do not proceed to trading logic
             return;
+        }
+
+        // --- ORPHANED ORDER CLEANUP LOGIC ---
+        // Requires accountData to be valid
+        if (accountData && !config.isSimulation) {
+            const currentActiveInstIds = new Set(
+                accountData.positions
+                .filter(p => parseFloat(p.pos) > 0)
+                .map(p => p.instId)
+            );
+
+            // A. Trigger-based Cleanup: Check coins that were active but now are not (Just Closed)
+            for (const instId of previousActiveInstIds) {
+                if (!currentActiveInstIds.has(instId)) {
+                    addLog('INFO', `[${instId}] 检测到仓位已平仓，正在扫描并清理残留策略委托...`);
+                    const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
+                    if (count > 0) addLog('SUCCESS', `[${instId}] 清理完成: 已撤销 ${count} 个无效挂单`);
+                }
+            }
+            previousActiveInstIds = currentActiveInstIds;
+
+            // B. Periodic Garbage Collection (Every 1 min)
+            // Checks ALL coins that currently have no position, just in case a close was missed during restart
+            if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
+                lastCleanupTime = Date.now();
+                // Check all supported coins that are NOT in active list
+                const allCoins = Object.values(COIN_CONFIG).map(c => c.instId);
+                for (const instId of allCoins) {
+                    if (!currentActiveInstIds.has(instId)) {
+                         // Silent check usually, log only if found
+                         const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
+                         if (count > 0) addLog('WARNING', `[${instId}] 周期巡检: 发现并清理了 ${count} 个残留挂单`);
+                    }
+                }
+            }
         }
 
         if (!isRunning) return;
