@@ -283,109 +283,43 @@ const analyzeCoin = async (
             invalidationReason = `[趋势反转] 1H趋势已变 (${trend1H.direction})，强制平仓`;
         }
 
-        // === 2. SEQUENTIAL TAKE PROFIT (Merged Execution) & TRAILING STOP ===
+        // === 2. EXCHANGE ENTRUSTMENT MONITORING ===
+        // 止盈动作不再由AI触发，而是开仓时已托管给交易所。
+        // AI仅负责：1. 检测阶段二达标时，移动止损到成本价(保护剩余仓位)。2. 日志记录。
         
         if (finalAction === 'HOLD') {
             
-            // 计算"估算初始开仓总量" (Estimated Initial Total Quantity)
-            // 公式: (总权益 - 未结盈亏) * 10% * 杠杆 / (入场价 * 合约面值)
-            const equityAtEntry = totalEquity - rawUpl;
-            const strategyAllocatedEquity = equityAtEntry * 0.10; 
-            const estInitialQty = (strategyAllocatedEquity * leverageVal) / (avgEntry * CONTRACT_VAL);
+            // --- STAGE LOGGING ---
+            const hitStages: string[] = [];
+            if (netRoi >= 0.05) hitStages.push("一(5%)");
+            if (netRoi >= 0.08) hitStages.push("二(8%)");
+            if (netRoi >= 0.12) hitStages.push("三(12%)");
+
+            if (hitStages.length > 0) {
+                 invalidationReason = `[托管运行中] 已达标阶段: ${hitStages.join(', ')}。止盈单由交易所自动执行。`;
+            }
+
+            // --- STAGE 2 MAINTENANCE: BREAK EVEN PROTECTION ---
+            // Rule: If Stage 2 passed (ROI >= 8%), Check Break Even
+            // 交易所止盈单只负责减仓，不负责改剩余仓位的止损，所以这里必须由AI执行。
+            if (netRoi >= 0.08) {
+                const currentSL = parseFloat(p.slTriggerPx || "0");
+                const feeBuffer = avgEntry * 0.002;
+                const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
+                
+                const isSecured = isLong ? (currentSL >= bePrice) : (currentSL > 0 && currentSL <= bePrice);
+                
+                if (!isSecured) {
+                    finalAction = "UPDATE_TPSL";
+                    finalSL = bePrice.toFixed(decimals);
+                    invalidationReason = `[阶段二风控] ROI达标8%，系统强制调整止损至成本价(${finalSL})`;
+                }
+            }
             
-            // --- ACTION BACKTRACKING & CUMULATIVE TP ---
-            // 检查历史日志，确定哪些阶段已完成
-            const relevantLogs = logs.filter(log => {
-                return log.timestamp.getTime() > posCreationTime && log.message.includes(`[${coinKey}]`) && log.type === 'TRADE';
-            });
-
-            const hasStage1 = relevantLogs.some(l => l.message.includes("阶段一"));
-            const hasStage2 = relevantLogs.some(l => l.message.includes("阶段二"));
-            const hasStage3 = relevantLogs.some(l => l.message.includes("阶段三"));
-
-            let pendingCloseRatio = 0;
-            let hitStages: string[] = [];
-
-            // Stage 1 Check: ROI >= 5%
-            if (netRoi >= 0.05 && !hasStage1) {
-                pendingCloseRatio += 0.30;
-                hitStages.push("一");
-            }
-
-            // Stage 2 Check: ROI >= 8%
-            if (netRoi >= 0.08 && !hasStage2) {
-                pendingCloseRatio += 0.30;
-                hitStages.push("二");
-            }
-
-            // Stage 3 Check: ROI >= 12%
-            if (netRoi >= 0.12 && !hasStage3) {
-                pendingCloseRatio += 0.20;
-                hitStages.push("三");
-            }
-
-            // --- EXECUTE MERGED CLOSING ---
-            if (pendingCloseRatio > 0) {
-                finalAction = isLong ? "SELL" : "BUY";
-                // Calculate accumulated quantity
-                const targetQty = estInitialQty * pendingCloseRatio;
-                finalSize = targetQty.toFixed(0); 
-                invalidationReason = `[多阶止盈合并] 同时满足阶段${hitStages.join('+')} (ROI ${(netRoi*100).toFixed(2)}%) -> 合并平仓初始量的 ${(pendingCloseRatio*100).toFixed(0)}%`;
-            } 
-            else {
-                // --- MAINTENANCE LOGIC (Update TP/SL) ---
-                // 只有在不需要平仓时，才进行止损调整，避免动作冲突
-
-                // Rule: If Stage 1 passed (either just now or historically), Check Break Even
-                // Using (hasStage1 || netRoi >= 0.05) to be safe
-                if (hasStage1 || netRoi >= 0.05) {
-                    const currentSL = parseFloat(p.slTriggerPx || "0");
-                    const feeBuffer = avgEntry * 0.002;
-                    const bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
-                    
-                    const isSecured = isLong ? (currentSL >= bePrice) : (currentSL > 0 && currentSL <= bePrice);
-                    
-                    if (!isSecured) {
-                        finalAction = "UPDATE_TPSL";
-                        finalSL = bePrice.toFixed(decimals);
-                        invalidationReason = `[阶段二风控] 利润回撤保护: 调整止损至成本价`;
-                    }
-                }
-
-                // Rule: If Stage 3 passed (Tail Position), Check Trailing Stop
-                // Using (hasStage3 || netRoi >= 0.12)
-                if (hasStage3 || netRoi >= 0.12) {
-                     // Trailing Stop for the remaining 20%
-                    // 1. Calculate Price Delta equivalent to 5% ROI
-                    const roiGap = 0.05;
-                    const priceGap = (roiGap * avgEntry) / leverageVal;
-                    
-                    // 2. Calculate Target SL based on CURRENT price
-                    let targetSL = isLong ? currentPrice - priceGap : currentPrice + priceGap;
-                    
-                    // 3. Compare with Existing SL
-                    const currentSL = parseFloat(p.slTriggerPx || "0");
-                    let needUpdate = false;
-                    
-                    if (isLong) {
-                        // Update if Target SL is higher than Current SL
-                        if (currentSL === 0 || targetSL > currentSL) {
-                            finalSL = targetSL.toFixed(decimals);
-                            needUpdate = true;
-                        } 
-                    } else {
-                        // Update if Target SL is lower than Current SL
-                        if (currentSL === 0 || targetSL < currentSL) {
-                            finalSL = targetSL.toFixed(decimals);
-                            needUpdate = true;
-                        }
-                    }
-                    
-                    if (needUpdate) {
-                        finalAction = "UPDATE_TPSL";
-                        invalidationReason = `[阶段四护盘] 尾仓追踪: 设置回撤5%止损 (当前ROI ${(netRoi*100).toFixed(2)}%)`;
-                    }
-                }
+            // --- STAGE 4 MONITORING ---
+            // 尾仓追踪止损已在开仓时设置(Move Order Stop)，无需AI操作。
+            if (netRoi >= 0.12) {
+                 invalidationReason += ` [尾仓追踪激活] ROI>12%，交易所移动止盈单已激活(回调5%出场)。`;
             }
         }
 
@@ -408,11 +342,9 @@ const analyzeCoin = async (
 
 **核心原则**:
 1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。
-2. **多阶段止盈 (基于初始开仓总量)**:
-   - 阶段一(满仓): ROI≥5% 平初始量的30%。
-   - 阶段二(余~70%): ROI≥8% 平初始量的30% + 移动止损至成本价。
-   - 阶段三(余~40%): ROI≥12% 平初始量的20%。
-   - 阶段四(余~20%): 尾仓设置动态追踪止损，从高点回撤5%ROI即清仓。
+2. **多阶段止盈 (交易所托管)**:
+   - 开仓后立即下达止盈委托，AI不再手动止盈。
+   - 阶段二(ROI≥8%)时，AI需负责将剩余仓位止损移动至成本价。
 
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction}
@@ -446,7 +378,7 @@ const analyzeCoin = async (
         let decision: AIDecision = {
             coin: coinKey,
             instId: INST_ID,
-            stage_analysis: "EMA严格趋势策略 (四阶段止盈版)",
+            stage_analysis: "EMA严格趋势策略 (交易所全托管版)",
             market_assessment: `【1H趋势】：${tDirection}\n【3m入场】：${tEntry}`,
             hot_events_overview: "策略配置已禁用热点分析", // Hardcoded per user request
             coin_analysis: `趋势: ${tDirection}。状态: ${posAnalysis}`,
@@ -529,11 +461,11 @@ const analyzeCoin = async (
 
                 // Quantize based on MIN_SZ (Replacing Math.floor)
                 // Using formula: Math.floor(raw / MIN_SZ) * MIN_SZ to handle both integer and decimal minSz
-                targetContracts = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
+                let targetContractsFormatted = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
                 
                 // Fix JS floating point precision (e.g. 0.15000000002)
                 const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
-                targetContracts = parseFloat(targetContracts.toFixed(precision));
+                targetContracts = parseFloat(targetContractsFormatted.toFixed(precision));
 
                 const targetMargin = targetContracts * marginPerContract;
 
@@ -565,9 +497,9 @@ const analyzeCoin = async (
                 let rawContracts = parseFloat(finalSize);
                 
                 // Quantize Closing Size
-                let targetContracts = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
+                let targetContractsFormatted = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
                 const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
-                contracts = parseFloat(targetContracts.toFixed(precision));
+                contracts = parseFloat(targetContractsFormatted.toFixed(precision));
                 
                 // Safety check: Don't close more than held
                 const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
