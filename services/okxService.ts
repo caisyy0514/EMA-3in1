@@ -29,16 +29,12 @@ const getHeaders = (method: string, requestPath: string, body: string = '', conf
   };
 };
 
-// EMA Calculation Helper inside Data Service
 const calculateEMA = (data: CandleData[], period: number): number[] => {
   if (data.length === 0) return [];
   const k = 2 / (period + 1);
   const result: number[] = [];
-  
-  // Use first close as initial EMA
   let ema = parseFloat(data[0].c);
   result.push(ema);
-  
   for (let i = 1; i < data.length; i++) {
     const price = parseFloat(data[i].c);
     ema = price * k + ema * (1 - k);
@@ -47,13 +43,10 @@ const calculateEMA = (data: CandleData[], period: number): number[] => {
   return result;
 };
 
-// Populate candles with EMA15 and EMA60
 const enrichCandlesWithEMA = (candles: CandleData[]): CandleData[] => {
     if(!candles || candles.length === 0) return [];
-    
     const ema15 = calculateEMA(candles, 15);
     const ema60 = calculateEMA(candles, 60);
-    
     return candles.map((c, i) => ({
         ...c,
         ema15: ema15[i],
@@ -90,10 +83,8 @@ async function fetchSingleCoinData(coinKey: string, config: any): Promise<Single
 
 export const fetchMarketData = async (config: any): Promise<MarketDataCollection> => {
   if (config.isSimulation) return generateMockMarketData();
-
   const results: Partial<MarketDataCollection> = {};
   const coins = Object.keys(COIN_CONFIG);
-  
   for (const coin of coins) {
       try {
           const data = await fetchSingleCoinData(coin, config);
@@ -109,7 +100,7 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop`;
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -122,47 +113,33 @@ const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
 
 export const fetchAccountData = async (config: any): Promise<AccountContext> => {
   if (config.isSimulation) return generateMockAccountData();
-
   try {
     const balPath = '/api/v5/account/balance?ccy=USDT';
     const balHeaders = getHeaders('GET', balPath, '', config);
     const balRes = await fetch(BASE_URL + balPath, { method: 'GET', headers: balHeaders });
     const balJson = await balRes.json();
-
     const posPath = `/api/v5/account/positions?instType=SWAP`;
     const posHeaders = getHeaders('GET', posPath, '', config);
     const posRes = await fetch(BASE_URL + posPath, { method: 'GET', headers: posHeaders });
     const posJson = await posRes.json();
-
     if (balJson.code && balJson.code !== '0') throw new Error(`Balance API: ${balJson.msg}`);
     const balanceData = balJson.data?.[0]?.details?.[0]; 
-    
     let positions: PositionData[] = [];
     if (posJson.data && posJson.data.length > 0) {
         const supportedInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
         const relevantPositions = posJson.data.filter((p: any) => supportedInstIds.includes(p.instId));
-
         if (relevantPositions.length > 0) {
              const uniqueInstIds = [...new Set(relevantPositions.map((p: any) => p.instId))];
              const algoOrdersMap: Record<string, any[]> = {};
              await Promise.all(uniqueInstIds.map(async (instId: any) => {
                  algoOrdersMap[instId] = await fetchAlgoOrders(instId, config);
              }));
-
              positions = relevantPositions.map((rawPos: any) => {
                 const position: PositionData = {
-                    instId: rawPos.instId,
-                    posSide: rawPos.posSide,
-                    pos: rawPos.pos,
-                    avgPx: rawPos.avgPx,
-                    breakEvenPx: rawPos.breakEvenPx,
-                    upl: rawPos.upl,
-                    uplRatio: rawPos.uplRatio,
-                    mgnMode: rawPos.mgnMode,
-                    margin: rawPos.margin,
-                    liqPx: rawPos.liqPx,
-                    cTime: rawPos.cTime,
-                    leverage: rawPos.lever
+                    instId: rawPos.instId, posSide: rawPos.posSide, pos: rawPos.pos,
+                    avgPx: rawPos.avgPx, breakEvenPx: rawPos.breakEvenPx, upl: rawPos.upl,
+                    uplRatio: rawPos.uplRatio, mgnMode: rawPos.mgnMode, margin: rawPos.margin,
+                    liqPx: rawPos.liqPx, cTime: rawPos.cTime, leverage: rawPos.lever
                 };
                 const algos = algoOrdersMap[rawPos.instId] || [];
                 if (algos.length > 0) {
@@ -176,11 +153,7 @@ export const fetchAccountData = async (config: any): Promise<AccountContext> => 
         }
     }
     return {
-      balance: {
-        totalEq: balanceData?.eq || "0",
-        availEq: balanceData?.availEq || "0",
-        uTime: balJson.data?.[0]?.uTime || Date.now().toString()
-      },
+      balance: { totalEq: balanceData?.eq || "0", availEq: balanceData?.availEq || "0", uTime: balJson.data?.[0]?.uTime || Date.now().toString() },
       positions
     };
   } catch (error: any) {
@@ -227,7 +200,6 @@ const getOrderDetails = async (instId: string, ordId: string, config: any) => {
 // Place Segmented Algo Strategy
 const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string, totalSz: string, config: any) => {
     if (config.isSimulation) return;
-    
     const entryPrice = parseFloat(avgPx);
     const size = parseFloat(totalSz);
     const coinKey = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId);
@@ -246,31 +218,31 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     const p2 = fmtPrice(getTpPrice(0.08)); 
     const p3 = fmtPrice(getTpPrice(0.12)); 
 
-    // --- REFINED SIZE ALLOCATION WITH MIN_SZ FLOOR ---
+    // --- GREEDY ALLOCATION WITH MIN_SZ FLOOR ---
     let remaining = size;
-    const processSz = (intended: number) => {
+    const calculateGreedySize = (pct: number) => {
         if (remaining <= 0) return 0;
-        let final = intended;
-        // Floor Logic: If less than minSz, bump up to minSz
-        if (final > 0 && final < MIN_SZ) final = MIN_SZ;
-        // Cap Logic: Cannot exceed remaining position
+        // Intended is the raw percentage of the total original size
+        let intended = size * pct;
+        // Ensure intended meets minSz
+        let final = Math.max(intended, MIN_SZ);
+        // Cap by remaining
         if (final > remaining) final = remaining;
         
         remaining = parseFloat((remaining - final).toFixed(sizePrecision));
         return parseFloat(final.toFixed(sizePrecision));
     };
 
-    const s1 = processSz(size * 0.30);
-    const s2 = processSz(size * 0.30);
-    const s3 = processSz(size * 0.20);
-    const s4 = processSz(remaining); // Remainder
+    const s1 = calculateGreedySize(0.30);
+    const s2 = calculateGreedySize(0.30);
+    const s3 = calculateGreedySize(0.20);
+    const s4 = parseFloat(remaining.toFixed(sizePrecision)); // Trailing gets the rest
 
     const algoPath = "/api/v5/trade/order-algo";
     const side = posSide === 'long' ? 'sell' : 'buy'; 
 
     const placeConditional = async (triggerPx: string, sz: number, stage: string) => {
         if (sz < MIN_SZ) return;
-        console.log(`[Strategy] Placing TP ${stage} for ${instId}: ${sz} @ ${triggerPx}`);
         const body = JSON.stringify({
             instId, tdMode: 'isolated', side, posSide, ordType: 'conditional',
             sz: sz.toString(), reduceOnly: true, tpTriggerPx: triggerPx, tpOrdPx: '-1'
@@ -284,8 +256,6 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
         const rawPriceCallback = 0.05 / leverage;
         const flooredCallback = Math.floor(rawPriceCallback * 1000) / 1000;
         const finalCallback = Math.max(0.001, flooredCallback);
-        
-        console.log(`[Strategy] Placing Trailing for ${instId}: ${sz} (Callback: ${finalCallback * 100}%)`);
         const body = JSON.stringify({
             instId, tdMode: 'isolated', side, posSide, ordType: 'move_order_stop',
             sz: sz.toString(), reduceOnly: true, callbackRatio: finalCallback.toFixed(3), activePx: activationPx
@@ -295,70 +265,67 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     };
 
     const promises = [];
-    if (s1 >= MIN_SZ) promises.push(placeConditional(p1, s1, "1 (5% ROI)"));
-    if (s2 >= MIN_SZ) promises.push(placeConditional(p2, s2, "2 (8% ROI)"));
-    if (s3 >= MIN_SZ) promises.push(placeConditional(p3, s3, "3 (12% ROI)"));
+    if (s1 >= MIN_SZ) promises.push(placeConditional(p1, s1, "1"));
+    if (s2 >= MIN_SZ) promises.push(placeConditional(p2, s2, "2"));
+    if (s3 >= MIN_SZ) promises.push(placeConditional(p3, s3, "3"));
     if (s4 >= MIN_SZ) promises.push(placeTrailing(p3, s4));
 
     try {
         await Promise.all(promises);
     } catch (e) {
-        console.error("Failed to place algo strategy", e);
+        console.error("Algo Placement Error", e);
     }
 };
 
-// Check and cancel orphaned algos (Cleanup logic)
+// Check and cancel orphaned algos (Aggressive cleanup)
 export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) => {
    if (config.isSimulation) return 0;
    try {
+       // Query ALL algos for this instrument
        const algos = await fetchAlgoOrders(instId, config);
        if (!algos || algos.length === 0) return 0;
 
-       // Explicitly include move_order_stop in the orphaned cleanup
-       const orphans = algos.filter((o: any) => 
-           (o.ordType === 'conditional' || o.ordType === 'move_order_stop' || o.ordType === 'oco') &&
-           o.reduceOnly === 'true'
-       );
+       // Filter any strategy order that is reduceOnly (should not exist if pos=0)
+       // We include move_order_stop, conditional, oco, etc.
+       const orphans = algos.filter((o: any) => o.reduceOnly === 'true');
        
        if (orphans.length > 0) {
+           console.log(`[Cleanup] Found ${orphans.length} ghost strategy orders for ${instId}. Purging...`);
            const toCancel = orphans.map((o: any) => ({ algoId: o.algoId, instId }));
            const path = "/api/v5/trade/cancel-algos";
            const body = JSON.stringify(toCancel);
            const headers = getHeaders('POST', path, body, config);
-           await fetch(BASE_URL + path, { method: 'POST', headers: headers, body: body });
-           return orphans.length;
+           const res = await fetch(BASE_URL + path, { method: 'POST', headers, body });
+           const json = await res.json();
+           return json.code === '0' ? orphans.length : 0;
        }
        return 0;
    } catch (e: any) {
-       console.error(`Failed to cleanup orphans for ${instId}:`, e.message);
+       console.error(`Purge failed for ${instId}:`, e.message);
        return 0;
    }
 };
 
 export const executeOrder = async (order: AIDecision, config: any): Promise<any> => {
-  if (config.isSimulation) return { code: "0", msg: "模拟下单成功", data: [{ ordId: "sim_" + Date.now() }] };
+  if (config.isSimulation) return { code: "0", msg: "模拟成功", data: [{ ordId: "sim_" + Date.now() }] };
   const targetInstId = order.instId;
-
   try {
     await ensureLongShortMode(config);
     if (order.action === 'CLOSE') {
         const closePath = "/api/v5/trade/close-position";
-        const closeLongBody = JSON.stringify({ instId: targetInstId, posSide: 'long', mgnMode: 'isolated' });
-        const resLong = await fetch(BASE_URL + closePath, { method: 'POST', headers: getHeaders('POST', closePath, closeLongBody, config), body: closeLongBody });
+        const bodyLong = JSON.stringify({ instId: targetInstId, posSide: 'long', mgnMode: 'isolated' });
+        const resLong = await fetch(BASE_URL + closePath, { method: 'POST', headers: getHeaders('POST', closePath, bodyLong, config), body: bodyLong });
         const jsonLong = await resLong.json();
         if (jsonLong.code === '0') return jsonLong;
-        
-        const closeShortBody = JSON.stringify({ instId: targetInstId, posSide: 'short', mgnMode: 'isolated' });
-        const resShort = await fetch(BASE_URL + closePath, { method: 'POST', headers: getHeaders('POST', closePath, closeShortBody, config), body: closeShortBody });
+        const bodyShort = JSON.stringify({ instId: targetInstId, posSide: 'short', mgnMode: 'isolated' });
+        const resShort = await fetch(BASE_URL + closePath, { method: 'POST', headers: getHeaders('POST', closePath, bodyShort, config), body: bodyShort });
         return await resShort.json();
     }
-
     let apiPosSide = '', apiSide = '', reduceOnly = false;
     const posPath = `/api/v5/account/positions?instId=${targetInstId}`;
     const posRes = await fetch(BASE_URL + posPath, { method: 'GET', headers: getHeaders('GET', posPath, '', config) });
     const posJson = await posRes.json();
     const currentPos = (posJson.data && posJson.data.length > 0) ? posJson.data[0] : null;
-
     if (currentPos && parseFloat(currentPos.pos) > 0) {
         apiPosSide = currentPos.posSide;
         if (currentPos.posSide === 'long') {
@@ -373,30 +340,25 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
         apiSide = order.action === 'BUY' ? 'buy' : 'sell';
         reduceOnly = false;
     }
-
     await setLeverage(targetInstId, order.leverage || DEFAULT_LEVERAGE, apiPosSide, config);
-    const slPrice = order.trading_decision?.stop_loss;
-    const validSl = slPrice && !isNaN(parseFloat(slPrice)) && parseFloat(slPrice) > 0 ? slPrice : null;
-
     const placeOrderWithRetry = async (currentSz: string, retries: number): Promise<any> => {
         const bodyObj: any = { instId: targetInstId, tdMode: "isolated", side: apiSide, posSide: apiPosSide, ordType: "market", sz: currentSz, reduceOnly };
-        if (validSl && !reduceOnly) {
-            bodyObj.attachAlgoOrds = [{ slTriggerPx: validSl, slOrdPx: '-1' }];
+        const slPrice = order.trading_decision?.stop_loss;
+        if (slPrice && !reduceOnly && parseFloat(slPrice) > 0) {
+            bodyObj.attachAlgoOrds = [{ slTriggerPx: slPrice, slOrdPx: '-1' }];
         }
         const requestBody = JSON.stringify(bodyObj);
         const headers = getHeaders('POST', "/api/v5/trade/order", requestBody, config);
         const response = await fetch(BASE_URL + "/api/v5/trade/order", { method: 'POST', headers, body: requestBody });
         const json = await response.json();
         const actualCode = (json.code === '1' && json.data?.[0]?.sCode) ? json.data[0].sCode : json.code;
-
         if (actualCode === '51008' && retries > 0) {
             const reduced = (parseFloat(currentSz) * 0.8).toFixed(2);
             if (parseFloat(reduced) >= 0.01) return placeOrderWithRetry(reduced, retries - 1);
         }
-        if (json.code !== '0') throw new Error(`Code ${json.code}: ${json.msg}`);
+        if (json.code !== '0') throw new Error(`OKX API ${json.code}: ${json.msg}`);
         return json;
     };
-
     const orderRes = await placeOrderWithRetry(order.size, 2); 
     if (!reduceOnly && orderRes.code === '0') {
         const ordId = orderRes.data?.[0]?.ordId;
@@ -416,7 +378,7 @@ export const executeOrder = async (order: AIDecision, config: any): Promise<any>
 };
 
 export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'short', size: string, slPrice?: string, tpPrice?: string, config?: any) => {
-    if (config.isSimulation) return { code: "0", msg: "模拟更新成功" };
+    if (config.isSimulation) return { code: "0", msg: "模拟成功" };
     try {
         const pendingAlgos = await fetchAlgoOrders(instId, config);
         const toCancel = [];
@@ -424,23 +386,21 @@ export const updatePositionTPSL = async (instId: string, posSide: 'long' | 'shor
             pendingAlgos.filter((o: any) => o.instId === instId && o.posSide === posSide && o.slTriggerPx && parseFloat(o.slTriggerPx) > 0)
                 .forEach((o: any) => toCancel.push({ algoId: o.algoId, instId }));
         }
-
         const path = "/api/v5/trade/order-algo";
         if (slPrice) {
             const body = JSON.stringify({ instId, posSide, tdMode: 'isolated', side: posSide === 'long' ? 'sell' : 'buy', ordType: 'conditional', sz: size, reduceOnly: true, slTriggerPx: slPrice, slOrdPx: '-1' });
             const res = await fetch(BASE_URL + path, { method: 'POST', headers: getHeaders('POST', path, body, config), body });
             const json = await res.json();
-            if (json.code !== '0') throw new Error(`设置止损失败: ${json.msg}`);
+            if (json.code !== '0') throw new Error(`SL Update Failed: ${json.msg}`);
         }
-
         if (toCancel.length > 0) {
             const cancelPath = "/api/v5/trade/cancel-algos";
             const cancelBody = JSON.stringify(toCancel);
             await fetch(BASE_URL + cancelPath, { method: 'POST', headers: getHeaders('POST', cancelPath, cancelBody, config), body: cancelBody });
         }
-        return { code: "0", msg: "止损更新成功" };
+        return { code: "0", msg: "更新成功" };
     } catch (e: any) {
-        throw new Error(`更新失败: ${e.message}`);
+        throw new Error(`TPSL失败: ${e.message}`);
     }
 };
 
