@@ -32,7 +32,7 @@ let isProcessing = false;
 // --- Cleanup State ---
 let previousActiveInstIds: Set<string> = new Set();
 let lastCleanupTime = 0;
-const CLEANUP_INTERVAL = 30 * 1000; // Increased frequency (30s)
+const CLEANUP_INTERVAL = 15 * 1000; // 提高巡检频率至 15s
 
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
@@ -42,7 +42,7 @@ const addLog = (type: SystemLog['type'], message: string) => {
       message 
   };
   logs.push(log);
-  if (logs.length > 200) logs = logs.slice(-200);
+  if (logs.length > 500) logs = logs.slice(-500); // 增加日志保存上限
   console.log(`[${type}] ${message}`);
 };
 
@@ -58,7 +58,7 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- ORPHANED ORDER CLEANUP (GHOST PROTECTOR) ---
+        // --- 强化：残留委托清理 (GHOST PROTECTOR v2) ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -66,23 +66,23 @@ const runTradingLoop = async () => {
                 .map(p => p.instId)
             );
 
-            // 1. Transition-based Cleanup (Triggered immediately after position goes to 0)
+            // 1. 瞬间清理 (仓位由有变无)
             for (const instId of previousActiveInstIds) {
                 if (!currentActiveInstIds.has(instId)) {
-                    addLog('INFO', `检测到 [${instId}] 仓位已清理，正在抹除残留的移动止盈委托...`);
+                    addLog('INFO', `[${instId}] 检测到平仓，执行地毯式策略单清理(含移动止盈)...`);
                     const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
-                    if (count > 0) addLog('SUCCESS', `已清理 [${instId}] 残留委托: ${count}个`);
+                    if (count > 0) addLog('SUCCESS', `[${instId}] 清理残留委托成功: ${count}个`);
                 }
             }
             previousActiveInstIds = currentActiveInstIds;
 
-            // 2. Continuous Guard (Garbage Collection)
+            // 2. 持续巡检 (强制兜底清理任何无持仓币种的 reduceOnly 单)
             if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
                 lastCleanupTime = Date.now();
                 const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
                 for (const instId of allPossibleInstIds) {
                     if (!currentActiveInstIds.has(instId)) {
-                         // Check every inactive coin to ensure no dangling reduceOnly orders exist
+                         // 即使没有状态转换，只要检测到无持仓且有策略单，强制清除
                          await okxService.checkAndCancelOrphanedAlgos(instId, config);
                     }
                 }
@@ -91,22 +91,42 @@ const runTradingLoop = async () => {
 
         if (!isRunning) return;
         const now = Date.now();
-        let intervalMs = 180000; 
+        
+        // 动态调整分析频率
+        let intervalMs = 180000; // 默认3分钟一次
         if (accountData && accountData.positions.length > 0) {
             const hasActivePos = accountData.positions.some(p => parseFloat(p.pos) > 0);
-            if (hasActivePos) intervalMs = 60000;
+            if (hasActivePos) intervalMs = 60000; // 有持仓时加密至1分钟
         }
+        
         if (now - lastAnalysisTime < intervalMs) return;
         lastAnalysisTime = now;
         
         if (!marketData || !accountData) return;
+
+        addLog('INFO', `>>> 引擎启动全币种技术扫描 (频率: ${intervalMs/1000}s) <<<`);
         const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
+        
         for (const decision of decisions) {
             decision.timestamp = Date.now();
             latestDecisions[decision.coin] = decision;
             decisionHistory.unshift(decision);
             if (decisionHistory.length > 1000) decisionHistory = decisionHistory.slice(0, 1000);
+            
             const position = accountData.positions.find(p => p.instId === decision.instId);
+            
+            // --- 强化日志记录：无论动作如何，都记录 AI 的核心判断 ---
+            // 移除截断，显示完整 reasoning
+            const logMsg = `[${decision.coin}] 状态: ${decision.action} | 分析: ${decision.reasoning}`;
+            
+            if (decision.action !== 'HOLD') {
+                addLog('INFO', logMsg);
+            } else {
+                // HOLD 状态下的心跳日志，确保用户看到技术面状态
+                const marketBrief = decision.market_assessment.replace(/\n/g, ' ');
+                addLog('INFO', `[${decision.coin}] 监控中: ${marketBrief}`);
+            }
+
             if (decision.action === 'UPDATE_TPSL') {
                 if (position) {
                     const newSL = decision.trading_decision.stop_loss;
@@ -114,23 +134,24 @@ const runTradingLoop = async () => {
                     if (isValid(newSL)) {
                         try {
                             const res = await okxService.updatePositionTPSL(decision.instId, position.posSide as 'long' | 'short', position.pos, newSL, undefined, config);
-                            addLog('SUCCESS', `[${decision.coin}] 风控移动: ${res.msg}`);
+                            addLog('SUCCESS', `[${decision.coin}] 移动止损指令下达: ${newSL} | 结果: ${res.msg}`);
                         } catch(err: any) {
-                            addLog('ERROR', `[${decision.coin}] 风控更新失败: ${err.message}`);
+                            addLog('ERROR', `[${decision.coin}] 止损更新失败: ${err.message}`);
                         }
                     }
                 }
             } else if (decision.action !== 'HOLD') {
                 try {
+                    addLog('INFO', `[${decision.coin}] 触发交易指令: ${decision.action} ${decision.size}张...`);
                     const res = await okxService.executeOrder(decision, config);
-                    addLog('TRADE', `[${decision.coin}] 动作: ${decision.action} ${decision.size}张. 结果: ${res.msg}`);
+                    addLog('TRADE', `[${decision.coin}] 指令执行完毕: ${decision.action} 结果: ${res.msg}`);
                 } catch(err: any) {
-                    addLog('ERROR', `[${decision.coin}] 下单失败: ${err.message}`);
+                    addLog('ERROR', `[${decision.coin}] 指令执行失败: ${err.message}`);
                 }
             }
         }
     } catch (e: any) {
-        addLog('ERROR', `Loop Panic: ${e.message}`);
+        addLog('ERROR', `系统运行崩溃: ${e.message}`);
     } finally {
         isProcessing = false;
     }
@@ -143,7 +164,6 @@ app.get('/api/status', (req, res) => {
 });
 
 app.get('/api/history', (req, res) => {
-    const now = Date.now();
     const actions = decisionHistory.filter(d => d.action !== 'HOLD').slice(0, 50);
     res.json({ recent: decisionHistory.slice(0, 50), actions });
 });
@@ -157,14 +177,14 @@ app.post('/api/config', (req, res) => {
         okxPassphrase: newConfig.okxPassphrase === '***' ? config.okxPassphrase : newConfig.okxPassphrase,
         deepseekApiKey: newConfig.deepseekApiKey === '***' ? config.deepseekApiKey : newConfig.deepseekApiKey,
     };
-    addLog('INFO', '配置变更已应用');
+    addLog('INFO', '交易策略配置已更新');
     res.json({ success: true });
 });
 
 app.post('/api/toggle', (req, res) => {
     const { running } = req.body;
     isRunning = running;
-    addLog('INFO', isRunning ? '>>> 引擎开启 <<<' : '>>> 引擎休眠 <<<');
+    addLog('INFO', isRunning ? '>>> 核心引擎开启：实时监控行情与自动风控已激活 <<<' : '>>> 核心引擎休眠：所有自动交易逻辑已暂停 <<<');
     res.json({ success: true, isRunning });
 });
 
@@ -173,6 +193,6 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Server on ${PORT}`);
-    addLog('INFO', '系统冷启动完成，正在监控行情...');
+    console.log(`Trading Server running on port ${PORT}`);
+    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。等待 API 连接中...');
 });
