@@ -100,7 +100,8 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}`;
+        // 关键修复：显式请求 move_order_stop 和 conditional 类型的待处理策略单
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -197,7 +198,6 @@ const getOrderDetails = async (instId: string, ordId: string, config: any) => {
     throw new Error(`无法获取订单详情: ${json.msg}`);
 };
 
-// Place Segmented Algo Strategy
 const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string, totalSz: string, config: any) => {
     if (config.isSimulation) return;
     const entryPrice = parseFloat(avgPx);
@@ -218,17 +218,12 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     const p2 = fmtPrice(getTpPrice(0.08)); 
     const p3 = fmtPrice(getTpPrice(0.12)); 
 
-    // --- GREEDY ALLOCATION WITH MIN_SZ FLOOR ---
     let remaining = size;
     const calculateGreedySize = (pct: number) => {
         if (remaining <= 0) return 0;
-        // Intended is the raw percentage of the total original size
         let intended = size * pct;
-        // Ensure intended meets minSz
         let final = Math.max(intended, MIN_SZ);
-        // Cap by remaining
         if (final > remaining) final = remaining;
-        
         remaining = parseFloat((remaining - final).toFixed(sizePrecision));
         return parseFloat(final.toFixed(sizePrecision));
     };
@@ -236,7 +231,7 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     const s1 = calculateGreedySize(0.30);
     const s2 = calculateGreedySize(0.30);
     const s3 = calculateGreedySize(0.20);
-    const s4 = parseFloat(remaining.toFixed(sizePrecision)); // Trailing gets the rest
+    const s4 = parseFloat(remaining.toFixed(sizePrecision));
 
     const algoPath = "/api/v5/trade/order-algo";
     const side = posSide === 'long' ? 'sell' : 'buy'; 
@@ -277,20 +272,17 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     }
 };
 
-// Check and cancel orphaned algos (Aggressive cleanup)
 export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) => {
    if (config.isSimulation) return 0;
    try {
-       // Query ALL algos for this instrument
+       // 地毯式查询所有类型的策略委托
        const algos = await fetchAlgoOrders(instId, config);
        if (!algos || algos.length === 0) return 0;
 
-       // Filter any strategy order that is reduceOnly (should not exist if pos=0)
-       // We include move_order_stop, conditional, oco, etc.
+       // 核心修复：清理所有 reduceOnly 的残留单，不限类型 (含 move_order_stop)
        const orphans = algos.filter((o: any) => o.reduceOnly === 'true');
        
        if (orphans.length > 0) {
-           console.log(`[Cleanup] Found ${orphans.length} ghost strategy orders for ${instId}. Purging...`);
            const toCancel = orphans.map((o: any) => ({ algoId: o.algoId, instId }));
            const path = "/api/v5/trade/cancel-algos";
            const body = JSON.stringify(toCancel);
