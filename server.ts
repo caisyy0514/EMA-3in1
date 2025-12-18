@@ -23,20 +23,17 @@ let config: AppConfig = { ...DEFAULT_CONFIG };
 let isRunning = false;
 let marketData: MarketDataCollection | null = null;
 let accountData: AccountContext | null = null;
-// Store latest decision per coin
 let latestDecisions: Record<string, AIDecision> = {};
 let decisionHistory: AIDecision[] = []; 
 let logs: SystemLog[] = [];
 let lastAnalysisTime = 0;
-// Fetching lock to prevent race conditions due to network delay
 let isProcessing = false;
 
 // --- Cleanup State ---
 let previousActiveInstIds: Set<string> = new Set();
 let lastCleanupTime = 0;
-const CLEANUP_INTERVAL = 60 * 1000; // 1 Minute
+const CLEANUP_INTERVAL = 30 * 1000; // Increased frequency (30s)
 
-// Helper to add logs
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
       id: Date.now().toString() + Math.random(), 
@@ -49,25 +46,19 @@ const addLog = (type: SystemLog['type'], message: string) => {
   console.log(`[${type}] ${message}`);
 };
 
-// --- Background Trading Loop ---
 const runTradingLoop = async () => {
-    // Lock check
     if (isProcessing) return;
     isProcessing = true;
-
     try {
-        // 1. Fetch Data
         try {
             marketData = await okxService.fetchMarketData(config);
             accountData = await okxService.fetchAccountData(config);
         } catch (e: any) {
-            if (isRunning) addLog('ERROR', `数据同步失败: ${e.message}`);
-            // If data fetch fails, do not proceed to trading logic
+            if (isRunning) addLog('ERROR', `数据获取异常: ${e.message}`);
             return;
         }
 
-        // --- ORPHANED ORDER CLEANUP LOGIC ---
-        // Requires accountData to be valid
+        // --- ORPHANED ORDER CLEANUP (GHOST PROTECTOR) ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -75,140 +66,86 @@ const runTradingLoop = async () => {
                 .map(p => p.instId)
             );
 
-            // A. Trigger-based Cleanup: Check coins that were active but now are not (Just Closed)
+            // 1. Transition-based Cleanup (Triggered immediately after position goes to 0)
             for (const instId of previousActiveInstIds) {
                 if (!currentActiveInstIds.has(instId)) {
-                    addLog('INFO', `[${instId}] 检测到仓位已平仓，正在扫描并清理残留策略委托...`);
+                    addLog('INFO', `检测到 [${instId}] 仓位已清理，正在抹除残留的移动止盈委托...`);
                     const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
-                    if (count > 0) addLog('SUCCESS', `[${instId}] 清理完成: 已撤销 ${count} 个无效挂单`);
+                    if (count > 0) addLog('SUCCESS', `已清理 [${instId}] 残留委托: ${count}个`);
                 }
             }
             previousActiveInstIds = currentActiveInstIds;
 
-            // B. Periodic Garbage Collection (Every 1 min)
-            // Checks ALL coins that currently have no position, just in case a close was missed during restart
+            // 2. Continuous Guard (Garbage Collection)
             if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
                 lastCleanupTime = Date.now();
-                // Check all supported coins that are NOT in active list
-                const allCoins = Object.values(COIN_CONFIG).map(c => c.instId);
-                for (const instId of allCoins) {
+                const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
+                for (const instId of allPossibleInstIds) {
                     if (!currentActiveInstIds.has(instId)) {
-                         // Silent check usually, log only if found
-                         const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
-                         if (count > 0) addLog('WARNING', `[${instId}] 周期巡检: 发现并清理了 ${count} 个残留挂单`);
+                         // Check every inactive coin to ensure no dangling reduceOnly orders exist
+                         await okxService.checkAndCancelOrphanedAlgos(instId, config);
                     }
                 }
             }
         }
 
         if (!isRunning) return;
-
-        // 2. AI Analysis Logic
         const now = Date.now();
-
-        // Determine interval: 3m default, 1m if ANY position exists
         let intervalMs = 180000; 
         if (accountData && accountData.positions.length > 0) {
-            // If any position size > 0, speed up
             const hasActivePos = accountData.positions.some(p => parseFloat(p.pos) > 0);
             if (hasActivePos) intervalMs = 60000;
         }
-
         if (now - lastAnalysisTime < intervalMs) return;
-
-        // Use setTimeout to run async logic without blocking the lock excessively 
-        // (Though since we await below, we are blocking next run anyway, which is desired)
-        
         lastAnalysisTime = now;
-        addLog('INFO', `正在调用云端战神引擎 (多币种并行)... 频率: ${intervalMs/1000}s`);
         
         if (!marketData || !accountData) return;
-
-        // Analyze ALL coins
-        // Pass logs for action backtracking
         const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
-        
-        // Process Each Decision
         for (const decision of decisions) {
-            // Update State
             decision.timestamp = Date.now();
-            latestDecisions[decision.coin] = decision; // Map by coin
-            
+            latestDecisions[decision.coin] = decision;
             decisionHistory.unshift(decision);
             if (decisionHistory.length > 1000) decisionHistory = decisionHistory.slice(0, 1000);
-            
-            const conf = decision.trading_decision?.confidence || "0%";
-            addLog('INFO', `[${decision.coin}] 决策: ${decision.action} (${conf})`);
-
-            // Find specific position for this coin
             const position = accountData.positions.find(p => p.instId === decision.instId);
-
-            // Execute Actions
             if (decision.action === 'UPDATE_TPSL') {
                 if (position) {
                     const newSL = decision.trading_decision.stop_loss;
-                    const newTP = decision.trading_decision.profit_target;
                     const isValid = (p: string) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0;
-                    
-                    if (isValid(newSL) || isValid(newTP)) {
-                        if (position.posSide === 'net') {
-                            addLog('WARNING', `[${decision.coin}] 单向持仓模式不支持自动更新止损`);
-                        } else {
-                            try {
-                                const res = await okxService.updatePositionTPSL(
-                                    decision.instId, 
-                                    position.posSide as 'long' | 'short', 
-                                    position.pos, 
-                                    isValid(newSL) ? newSL : undefined,
-                                    isValid(newTP) ? newTP : undefined,
-                                    config
-                                );
-                                addLog('SUCCESS', `[${decision.coin}] 止损更新: ${res.msg}`);
-                            } catch(err: any) {
-                                addLog('ERROR', `[${decision.coin}] 更新止损失败: ${err.message}`);
-                            }
+                    if (isValid(newSL)) {
+                        try {
+                            const res = await okxService.updatePositionTPSL(decision.instId, position.posSide as 'long' | 'short', position.pos, newSL, undefined, config);
+                            addLog('SUCCESS', `[${decision.coin}] 风控移动: ${res.msg}`);
+                        } catch(err: any) {
+                            addLog('ERROR', `[${decision.coin}] 风控更新失败: ${err.message}`);
                         }
                     }
                 }
             } else if (decision.action !== 'HOLD') {
                 try {
                     const res = await okxService.executeOrder(decision, config);
-                    addLog('TRADE', `[${decision.coin}] 执行: ${decision.action} ${decision.size} 张. 结果: ${res.msg}`);
+                    addLog('TRADE', `[${decision.coin}] 动作: ${decision.action} ${decision.size}张. 结果: ${res.msg}`);
                 } catch(err: any) {
-                    addLog('ERROR', `[${decision.coin}] 订单失败: ${err.message}`);
+                    addLog('ERROR', `[${decision.coin}] 下单失败: ${err.message}`);
                 }
             }
         }
-
     } catch (e: any) {
-        addLog('ERROR', `策略执行异常: ${e.message}`);
+        addLog('ERROR', `Loop Panic: ${e.message}`);
     } finally {
         isProcessing = false;
     }
 };
 
-// Start Loop
 setInterval(runTradingLoop, 5000);
 
-// --- API Endpoints ---
-
 app.get('/api/status', (req, res) => {
-    res.json({
-        isRunning,
-        config: { ...config, okxSecretKey: '***', okxPassphrase: '***', deepseekApiKey: '***' },
-        marketData,
-        accountData,
-        latestDecisions, // Return map
-        logs
-    });
+    res.json({ isRunning, config: { ...config, okxSecretKey: '***', okxPassphrase: '***', deepseekApiKey: '***' }, marketData, accountData, latestDecisions, logs });
 });
 
 app.get('/api/history', (req, res) => {
     const now = Date.now();
-    const oneHour = 60 * 60 * 1000;
-    const recent = decisionHistory.filter(d => (d.timestamp || 0) > now - oneHour);
     const actions = decisionHistory.filter(d => d.action !== 'HOLD').slice(0, 50);
-    res.json({ recent, actions });
+    res.json({ recent: decisionHistory.slice(0, 50), actions });
 });
 
 app.post('/api/config', (req, res) => {
@@ -220,14 +157,14 @@ app.post('/api/config', (req, res) => {
         okxPassphrase: newConfig.okxPassphrase === '***' ? config.okxPassphrase : newConfig.okxPassphrase,
         deepseekApiKey: newConfig.deepseekApiKey === '***' ? config.deepseekApiKey : newConfig.deepseekApiKey,
     };
-    addLog('INFO', '配置已通过 Web 更新');
+    addLog('INFO', '配置变更已应用');
     res.json({ success: true });
 });
 
 app.post('/api/toggle', (req, res) => {
     const { running } = req.body;
     isRunning = running;
-    addLog('INFO', isRunning ? '>>> 策略引擎已启动 <<<' : '>>> 策略引擎已暂停 <<<');
+    addLog('INFO', isRunning ? '>>> 引擎开启 <<<' : '>>> 引擎休眠 <<<');
     res.json({ success: true, isRunning });
 });
 
@@ -236,6 +173,6 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    addLog('INFO', `系统初始化完成 (支持币种: ${Object.keys(COIN_CONFIG).join(', ')})`);
+    console.log(`Server on ${PORT}`);
+    addLog('INFO', '系统冷启动完成，正在监控行情...');
 });
