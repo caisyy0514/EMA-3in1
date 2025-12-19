@@ -100,8 +100,10 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        // 核心修复：移除 ordType 参数。不带此参数将返回所有类型的策略委托（含移动止盈、止盈止损单等）
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}`;
+        // 核心加固：显式请求所有关键类型，防止 OKX 默认仅返回 conditional
+        // 包含：条件单 (conditional), 触发单 (trigger), 移动止盈止损 (move_order_stop)
+        const types = "conditional,move_order_stop,trigger";
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=${types}`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -211,21 +213,17 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     const decimals = TICK_SIZE < 0.01 ? 4 : 2;
     const sizePrecision = MIN_SZ.toString().split('.')[1]?.length || 0;
 
-    // --- 核心优化：净利润 ROI 计算 ---
-    // 手续费双边损耗 (Taker 0.05% * 2 = 0.1%)
-    // 在本金 ROI 层面的损耗 = 损耗率 * 杠杆
     const feeImpactOnROI = (TAKER_FEE_RATE * 2) * leverage;
     
     const fmtPrice = (p: number) => p.toFixed(decimals);
-    // 这里的 netRoi 为目标净利 (0.05 代表 5% 纯利)
     const getTpPrice = (netRoi: number) => {
         const grossRoi = netRoi + feeImpactOnROI;
         return posSide === 'long' ? entryPrice * (1 + grossRoi / leverage) : entryPrice * (1 - grossRoi / leverage);
     };
 
-    const p1 = fmtPrice(getTpPrice(0.05)); // 5% 净利
-    const p2 = fmtPrice(getTpPrice(0.08)); // 8% 净利
-    const p3 = fmtPrice(getTpPrice(0.12)); // 12% 净利
+    const p1 = fmtPrice(getTpPrice(0.05)); 
+    const p2 = fmtPrice(getTpPrice(0.08)); 
+    const p3 = fmtPrice(getTpPrice(0.12)); 
 
     let remaining = size;
     const calculateGreedySize = (pct: number) => {
@@ -257,7 +255,6 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
 
     const placeTrailing = async (activationPx: string, sz: number) => {
         if (sz < MIN_SZ) return;
-        // 移动止盈的回调幅度逻辑保持不变，确保追踪趋势
         const rawPriceCallback = 0.05 / leverage;
         const flooredCallback = Math.floor(rawPriceCallback * 1000) / 1000;
         const finalCallback = Math.max(0.001, flooredCallback);
@@ -289,7 +286,6 @@ export const checkAndCancelOrphanedAlgos = async (instId: string, config: any): 
        const algos = await fetchAlgoOrders(instId, config);
        if (!algos || algos.length === 0) return [];
 
-       // 强制清理该币种下的所有策略单，不设 reduceOnly 过滤
        const toCancel = algos.map((o: any) => ({ algoId: o.algoId, instId }));
        
        if (toCancel.length > 0) {
@@ -300,12 +296,12 @@ export const checkAndCancelOrphanedAlgos = async (instId: string, config: any): 
            const json = await res.json();
            
            if (json.code === '0') {
-               // 返回详情列表用于日志
                return algos.map(o => ({
                    id: o.algoId,
                    type: o.ordType,
                    triggerPx: o.tpTriggerPx || o.slTriggerPx || '--',
-                   activePx: o.activePx || '--'
+                   activePx: o.activePx || '--',
+                   callback: o.callbackRatio || '--'
                }));
            }
        }
