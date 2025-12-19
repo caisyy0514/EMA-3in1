@@ -5,7 +5,7 @@ import SettingsModal from '../components/SettingsModal';
 import HistoryModal from '../components/HistoryModal';
 import DecisionReport from '../components/DecisionReport';
 import { MarketDataCollection, AccountContext, AIDecision, SystemLog, AppConfig, PositionData } from '../types';
-import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X, Coins } from 'lucide-react';
+import { Settings, Play, Pause, Activity, Terminal, History, Wallet, TrendingUp, AlertTriangle, ExternalLink, ShieldCheck, Crosshair, DollarSign, Layers, X, Coins, Zap } from 'lucide-react';
 import { DEFAULT_CONFIG, COIN_CONFIG, TAKER_FEE_RATE } from '../constants';
 
 const App: React.FC = () => {
@@ -233,7 +233,6 @@ const App: React.FC = () => {
         <div className="max-w-[1920px] mx-auto w-full lg:h-full h-auto grid grid-cols-1 lg:grid-cols-12 gap-4">
         
           <div className="lg:col-span-8 flex flex-col gap-4 lg:h-full h-auto min-h-0">
-             {/* Mobile Coin Tabs */}
             <div className="flex gap-2 shrink-0 overflow-x-auto pb-1">
                 {Object.keys(COIN_CONFIG).map(coin => (
                     <button
@@ -265,19 +264,28 @@ const App: React.FC = () => {
                </div>
             </div>
 
-            <div className="lg:h-[40%] h-[200px] bg-okx-card rounded-xl border border-okx-border flex flex-col shadow-lg overflow-hidden shrink-0">
-              <div className="px-4 py-2 border-b border-okx-border bg-okx-bg/50 flex items-center justify-between shrink-0">
-                <span className="text-xs font-bold text-okx-subtext">System Logs</span>
+            <div className="lg:h-[40%] h-[300px] bg-okx-card rounded-xl border border-okx-border flex flex-col shadow-lg overflow-hidden shrink-0">
+              <div className="px-4 py-2.5 border-b border-okx-border bg-okx-bg/50 flex items-center justify-between shrink-0">
+                <span className="text-xs font-bold text-okx-subtext flex items-center gap-2">
+                  <Terminal size={14}/> System Logs
+                </span>
               </div>
-              <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1.5 custom-scrollbar bg-[#0c0c0e]">
+              <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-2 custom-scrollbar bg-[#0c0c0e]">
                 {logs.slice().reverse().map((log) => (
-                  <div key={log.id} className="flex gap-2 border-b border-white/5 last:border-0 pb-1 mb-1">
-                    <span className={`font-bold ${
-                      log.type === 'ERROR' ? 'text-okx-down' :
-                      log.type === 'SUCCESS' ? 'text-okx-up' :
-                      'text-gray-400'
-                    }`}>[{log.type}]</span>
-                    <span className="text-gray-300 break-all">{log.message}</span>
+                  <div key={log.id} className="flex gap-3 items-start border-b border-white/[0.03] last:border-0 pb-2 hover:bg-white/[0.02] transition-colors group">
+                    <span className="text-gray-600 shrink-0 select-none w-[70px]">
+                      [{new Date(log.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}]
+                    </span>
+                    <span className={`font-black shrink-0 w-[60px] text-center rounded-[2px] text-[10px] py-0.5 ${
+                      log.type === 'ERROR' ? 'bg-red-500/10 text-okx-down border border-red-500/20' :
+                      log.type === 'SUCCESS' ? 'bg-emerald-500/10 text-okx-up border border-emerald-500/20' :
+                      log.type === 'WARNING' ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20' :
+                      log.type === 'TRADE' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
+                      'bg-gray-500/10 text-gray-400 border border-gray-500/20'
+                    }`}>
+                      [{log.type}]
+                    </span>
+                    <span className="text-gray-200 break-words flex-1 leading-relaxed">{log.message}</span>
                   </div>
                 ))}
               </div>
@@ -307,7 +315,15 @@ const App: React.FC = () => {
                       </h2>
                   </div>
                   <div className="p-4 bg-[#121214]">
-                      {currentDecision ? (
+                      {currentDecision ? (() => {
+                          const coinConf = COIN_CONFIG[activeCoin];
+                          const price = parseFloat(currentCoinData?.ticker?.last || '0');
+                          const lev = parseFloat(currentDecision.leverage || '20');
+                          const sz = parseFloat(currentDecision.size || '0');
+                          const val = sz * (coinConf?.contractVal || 0) * price;
+                          const margin = lev > 0 ? val / lev : 0;
+
+                          return (
                           <div className="space-y-4">
                               <div className="flex items-center justify-between">
                                   <span className={`px-4 py-1.5 rounded text-sm font-bold ${
@@ -322,6 +338,39 @@ const App: React.FC = () => {
                                       <div className="text-purple-400 font-bold font-mono">{currentDecision.trading_decision?.confidence}</div>
                                   </div>
                               </div>
+
+                              <div className="grid grid-cols-2 gap-2 text-xs">
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><Layers size={10}/> 数量 (Size)</div>
+                                    <div className="font-mono text-white tracking-wider flex items-baseline gap-1">
+                                        {sz} 张 
+                                        {val > 0 && <span className="text-[9px] text-gray-500">({val.toFixed(0)}U)</span>}
+                                    </div>
+                                </div>
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><Zap size={10}/> 杠杆 (Lev)</div>
+                                    <div className="font-mono text-white tracking-wider">{lev}x</div>
+                                </div>
+                                
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><DollarSign size={10}/> 保证金 (Est)</div>
+                                    <div className="font-mono text-yellow-500 tracking-wider">{margin.toFixed(2)} U</div>
+                                </div>
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><TrendingUp size={10}/> 市价 (Price)</div>
+                                    <div className="font-mono text-blue-400 tracking-wider">{price.toFixed(2)}</div>
+                                </div>
+
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center gap-1"><ShieldCheck size={10}/> 止损 (SL)</div>
+                                    <div className="font-mono text-orange-400 tracking-wider">{currentDecision.trading_decision?.stop_loss || '--'}</div>
+                                </div>
+                                <div className="bg-gray-800/30 p-2 rounded border border-gray-700/50 text-right">
+                                    <div className="text-okx-subtext mb-0.5 flex items-center justify-end gap-1"><Crosshair size={10}/> 止盈 (TP)</div>
+                                    <div className="font-mono text-green-400 tracking-wider">{currentDecision.trading_decision?.profit_target || '--'}</div>
+                                </div>
+                              </div>
+
                               <button 
                                 onClick={() => setIsFullReportOpen(true)}
                                 className="w-full py-2 bg-gray-800 text-xs text-okx-subtext rounded border border-gray-700"
@@ -329,7 +378,7 @@ const App: React.FC = () => {
                                   <ExternalLink size={12} className="inline mr-1" /> 查看报告
                               </button>
                           </div>
-                      ) : (
+                      )})() : (
                           <div className="py-6 text-center text-xs text-okx-subtext">连接中...</div>
                       )}
                   </div>
