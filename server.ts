@@ -57,7 +57,7 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- 核心：地毯式幽灵单审计逻辑 (加固版) ---
+        // --- 幽灵单审计逻辑 ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -68,33 +68,26 @@ const runTradingLoop = async () => {
             if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
                 lastCleanupTime = Date.now();
                 const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
-                
                 let totalFound = 0;
                 let auditedCoins: string[] = [];
 
                 for (const instId of allPossibleInstIds) {
                     const coinName = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId) || instId;
                     auditedCoins.push(coinName);
-                    
                     if (!currentActiveInstIds.has(instId)) {
-                        // 执行强制撤单动作 (API 层已加固 instType=SWAP)
                         const purgedAlgos = await okxService.checkAndCancelOrphanedAlgos(instId, config);
-                        
                         if (purgedAlgos.length > 0) {
                             totalFound += purgedAlgos.length;
-                            addLog('WARNING', `[${coinName}] 确认为幽灵单！正在强制爆破清理...`);
+                            addLog('WARNING', `[${coinName}] 发现残留订单！正在清理...`);
                             purgedAlgos.forEach(o => {
-                                const typeLabel = o.type === 'move_order_stop' ? '移动止盈止损' : (o.type === 'conditional' ? '止盈止损条件单' : o.type);
-                                addLog('INFO', `[${coinName}] 清理明细: ID=${o.id} | 类型=${typeLabel} | 激活价=${o.activePx} | 回调=${o.callback}`);
+                                addLog('INFO', `[${coinName}] 清理 ID=${o.id} | 类型=${o.type} | 激活价=${o.activePx}`);
                             });
-                            addLog('SUCCESS', `[${coinName}] 幽灵单清理成功，共清除 ${purgedAlgos.length} 个残留项`);
                         }
                     }
                 }
-
-                // 合并输出审计概况，只有发现幽灵单时才展开详细日志，平时仅输出概况
-                if (totalFound === 0) {
-                    addLog('INFO', `[系统审计] 扫描完毕 (${auditedCoins.join(', ')}): 未发现残留订单，状态洁净。`);
+                if (totalFound === 0 && auditedCoins.length > 0) {
+                    // 仅记录静默审计
+                    console.log(`[审计] 状态洁净: ${auditedCoins.join(', ')}`);
                 }
             }
         }
@@ -113,7 +106,7 @@ const runTradingLoop = async () => {
         
         if (!marketData || !accountData) return;
 
-        addLog('INFO', `>>> 引擎启动全币种技术扫描 (频率: ${intervalMs/1000}s) <<<`);
+        addLog('INFO', `>>> 引擎启动行情扫描 (周期: ${intervalMs/1000}s) <<<`);
         const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
         
         for (const decision of decisions) {
@@ -127,9 +120,6 @@ const runTradingLoop = async () => {
             
             if (decision.action !== 'HOLD') {
                 addLog('INFO', logMsg);
-            } else {
-                const marketBrief = decision.market_assessment.replace(/\n/g, ' ');
-                addLog('INFO', `[${decision.coin}] 监控中: ${marketBrief}`);
             }
 
             if (decision.action === 'UPDATE_TPSL') {
@@ -138,11 +128,15 @@ const runTradingLoop = async () => {
                     const isValid = (p: string) => p && !isNaN(parseFloat(p)) && parseFloat(p) > 0;
                     if (isValid(newSL)) {
                         try {
+                            const oldSL = position.slTriggerPx || "未设置";
+                            addLog('INFO', `[${decision.coin}] 尝试调整止损: ${oldSL} -> ${newSL}`);
                             const res = await okxService.updatePositionTPSL(decision.instId, position.posSide as 'long' | 'short', position.pos, newSL, undefined, config);
-                            addLog('SUCCESS', `[${decision.coin}] 移动止损指令下达: ${newSL} | 结果: ${res.msg}`);
+                            addLog('SUCCESS', `[${decision.coin}] 止损同步成功: ${newSL} | API响应: ${res.msg}`);
                         } catch(err: any) {
                             addLog('ERROR', `[${decision.coin}] 止损更新失败: ${err.message}`);
                         }
+                    } else {
+                        addLog('WARNING', `[${decision.coin}] 止损价无效: ${newSL}`);
                     }
                 }
             } else if (decision.action !== 'HOLD') {
@@ -189,7 +183,7 @@ app.post('/api/config', (req, res) => {
 app.post('/api/toggle', (req, res) => {
     const { running } = req.body;
     isRunning = running;
-    addLog('INFO', isRunning ? '>>> 核心引擎开启：实时监控行情与自动风控已激活 <<<' : '>>> 核心引擎休眠：所有自动交易逻辑已暂停 <<<');
+    addLog('INFO', isRunning ? '>>> 核心引擎开启：实时监控与自动风控已激活 <<<' : '>>> 核心引擎休眠：所有自动交易逻辑已暂停 <<<');
     res.json({ success: true, isRunning });
 });
 
@@ -199,5 +193,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Trading Server running on port ${PORT}`);
-    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。幽灵单审计引擎已强化。');
+    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。');
 });
