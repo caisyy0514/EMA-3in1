@@ -99,18 +99,26 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
-    try {
-        // 核心加固：必须显式指定 instType=SWAP，否则 OKX 默认查询现货
-        const types = "conditional,move_order_stop,trigger";
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&instType=SWAP&ordType=${types}`;
-        const headers = getHeaders('GET', path, '', config);
-        const res = await fetch(BASE_URL + path, { method: 'GET', headers });
-        const json = await res.json();
-        return json.code === '0' ? json.data : [];
-    } catch (e) {
-        console.warn("Failed to fetch algo orders", e);
-        return [];
-    }
+    
+    // 修复结论：OKX 不支持 ordType 逗号分隔查询。改为分步并发查询。
+    const orderTypes = ["conditional", "move_order_stop", "trigger"];
+    let allOrders: any[] = [];
+
+    await Promise.all(orderTypes.map(async (type) => {
+        try {
+            const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&instType=SWAP&ordType=${type}`;
+            const headers = getHeaders('GET', path, '', config);
+            const res = await fetch(BASE_URL + path, { method: 'GET', headers });
+            const json = await res.json();
+            if (json.code === '0' && json.data) {
+                allOrders = [...allOrders, ...json.data];
+            }
+        } catch (e) {
+            console.warn(`Fetch failed for algo type ${type}:`, e);
+        }
+    }));
+
+    return allOrders;
 };
 
 export const fetchAccountData = async (config: any): Promise<AccountContext> => {
@@ -281,7 +289,7 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
 export const checkAndCancelOrphanedAlgos = async (instId: string, config: any): Promise<any[]> => {
    if (config.isSimulation) return [];
    try {
-       // 全量抓取，无差别扫描
+       // 通过修复后的 fetchAlgoOrders（支持并发多类型抓取）获取数据
        const algos = await fetchAlgoOrders(instId, config);
        if (!algos || algos.length === 0) return [];
 
