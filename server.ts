@@ -78,16 +78,15 @@ const runTradingLoop = async () => {
                         const purgedAlgos = await okxService.checkAndCancelOrphanedAlgos(instId, config);
                         if (purgedAlgos.length > 0) {
                             totalFound += purgedAlgos.length;
-                            addLog('WARNING', `[${coinName}] 发现残留订单！正在清理...`);
+                            addLog('WARNING', `[审计] ${coinName} 发现残留订单！正在执行紧急清理...`);
                             purgedAlgos.forEach(o => {
-                                addLog('INFO', `[${coinName}] 清理 ID=${o.id} | 类型=${o.type} | 激活价=${o.activePx}`);
+                                addLog('INFO', `[清理] ${coinName} 订单ID: ${o.id} | 类型: ${o.type} | 触发价: ${o.triggerPx}`);
                             });
                         }
                     }
                 }
                 if (totalFound === 0 && auditedCoins.length > 0) {
-                    // 仅记录静默审计
-                    console.log(`[审计] 状态洁净: ${auditedCoins.join(', ')}`);
+                    console.log(`[静默审计] 账户环境洁净: ${auditedCoins.join(', ')}`);
                 }
             }
         }
@@ -116,12 +115,21 @@ const runTradingLoop = async () => {
             if (decisionHistory.length > 1000) decisionHistory = decisionHistory.slice(0, 1000);
             
             const position = accountData.positions.find(p => p.instId === decision.instId);
-            const logMsg = `[${decision.coin}] 状态: ${decision.action} | 分析: ${decision.reasoning}`;
             
-            if (decision.action !== 'HOLD') {
-                addLog('INFO', logMsg);
+            // 构建详细版扫描日志
+            const trendTag = decision.market_assessment.split('\n')[0].replace('【1H趋势】：', '') || '未知';
+            const entryTag = decision.market_assessment.split('\n')[1]?.replace('【3m入场】：', '') || '未就绪';
+            
+            if (decision.action === 'HOLD') {
+                // HOLD 状态显示战略评估摘要
+                addLog('INFO', `[${decision.coin}] 趋势:${trendTag} | 状态:${entryTag} | 结论:继续观察`);
+            } else if (decision.action === 'UPDATE_TPSL') {
+                addLog('TRADE', `[${decision.coin}] 策略调整: 净ROI达标，准备将止损移动至成本价 (${decision.trading_decision.stop_loss})`);
+            } else {
+                addLog('TRADE', `[${decision.coin}] 信号触发: ${decision.action} | 理由: ${decision.reasoning}`);
             }
 
+            // 执行逻辑
             if (decision.action === 'UPDATE_TPSL') {
                 if (position) {
                     const newSL = decision.trading_decision.stop_loss;
@@ -129,21 +137,19 @@ const runTradingLoop = async () => {
                     if (isValid(newSL)) {
                         try {
                             const oldSL = position.slTriggerPx || "未设置";
-                            addLog('INFO', `[${decision.coin}] 尝试调整止损: ${oldSL} -> ${newSL}`);
+                            addLog('INFO', `[${decision.coin}] 同步指令: 止损由 ${oldSL} 调整为 ${newSL}`);
                             const res = await okxService.updatePositionTPSL(decision.instId, position.posSide as 'long' | 'short', position.pos, newSL, undefined, config);
-                            addLog('SUCCESS', `[${decision.coin}] 止损同步成功: ${newSL} | API响应: ${res.msg}`);
+                            addLog('SUCCESS', `[${decision.coin}] 交易所委托更新成功: ${res.msg}`);
                         } catch(err: any) {
                             addLog('ERROR', `[${decision.coin}] 止损更新失败: ${err.message}`);
                         }
-                    } else {
-                        addLog('WARNING', `[${decision.coin}] 止损价无效: ${newSL}`);
                     }
                 }
             } else if (decision.action !== 'HOLD') {
                 try {
-                    addLog('INFO', `[${decision.coin}] 触发交易指令: ${decision.action} ${decision.size}张...`);
+                    addLog('INFO', `[${decision.coin}] 正在向交易所发送 ${decision.action} 指令 (数量: ${decision.size})...`);
                     const res = await okxService.executeOrder(decision, config);
-                    addLog('TRADE', `[${decision.coin}] 指令执行完毕: ${decision.action} 结果: ${res.msg}`);
+                    addLog('SUCCESS', `[${decision.coin}] 指令执行完毕: ${res.msg}`);
                 } catch(err: any) {
                     addLog('ERROR', `[${decision.coin}] 指令执行失败: ${err.message}`);
                 }
@@ -193,5 +199,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Trading Server running on port ${PORT}`);
-    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。');
+    addLog('INFO', 'EMA Hunter 3in1 Pro 系统初始化完毕。');
 });
