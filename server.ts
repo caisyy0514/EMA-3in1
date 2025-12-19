@@ -31,7 +31,7 @@ let isProcessing = false;
 
 // --- Cleanup State ---
 let lastCleanupTime = 0;
-const CLEANUP_INTERVAL = 15 * 1000; // 维持 15s 巡检
+const CLEANUP_INTERVAL = 15 * 1000; 
 
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
@@ -57,7 +57,7 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- 强化：幽灵单地毯式清理 (GHOST BUSTER v3) ---
+        // --- 核心：地毯式幽灵单审计逻辑 ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -65,23 +65,30 @@ const runTradingLoop = async () => {
                 .map(p => p.instId)
             );
 
-            // 每 15 秒强制巡检全币种，只要没仓位就强制清空所有策略委托
             if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
                 lastCleanupTime = Date.now();
                 const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
                 
                 for (const instId of allPossibleInstIds) {
+                    const coinName = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId) || instId;
+                    
                     if (!currentActiveInstIds.has(instId)) {
-                        // 强制暴力清理该 instId 下所有策略单
+                        // 启动深度扫描审计
+                        addLog('INFO', `[审计] 检查 ${coinName} 是否有残留幽灵单...`);
+                        
                         const purgedAlgos = await okxService.checkAndCancelOrphanedAlgos(instId, config);
                         
                         if (purgedAlgos.length > 0) {
-                            const coinName = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId) || instId;
-                            addLog('WARNING', `[${coinName}] 发现幽灵单！正在执行暴力清理...`);
+                            addLog('WARNING', `[${coinName}] 确认为幽灵单！正在强制爆破清理...`);
                             purgedAlgos.forEach(o => {
-                                addLog('INFO', `[${coinName}] 已清理: ID=${o.id} | 类型=${o.type} | 触发价=${o.triggerPx} | 激活价=${o.activePx}`);
+                                // 详细输出每一个幽灵单的类型，帮助用户复盘
+                                const typeLabel = o.type === 'move_order_stop' ? '移动止盈止损' : (o.type === 'conditional' ? '止盈止损条件单' : o.type);
+                                addLog('INFO', `[${coinName}] 清理明细: ID=${o.id} | 类型=${typeLabel} | 激活价=${o.activePx} | 回调=${o.callback}`);
                             });
-                            addLog('SUCCESS', `[${coinName}] 清理完毕，共清除 ${purgedAlgos.length} 个残留委托单`);
+                            addLog('SUCCESS', `[${coinName}] 幽灵单清理成功，共清除 ${purgedAlgos.length} 个残留项`);
+                        } else {
+                            // 审计通过，该币种无残留
+                            console.log(`[审计] ${coinName} 状态干净，无残留策略委托。`);
                         }
                     }
                 }
@@ -188,5 +195,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Trading Server running on port ${PORT}`);
-    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。等待 API 连接中...');
+    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。审计引擎已挂载。');
 });
