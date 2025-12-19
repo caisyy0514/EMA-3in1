@@ -100,8 +100,8 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        // 显式请求所有可能作为幽灵单存在的策略类型
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop,trigger`;
+        // 核心修复：移除 ordType 参数。不带此参数将返回所有类型的策略委托（含移动止盈、止盈止损单等）
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -282,16 +282,14 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     }
 };
 
-export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) => {
-   if (config.isSimulation) return 0;
+export const checkAndCancelOrphanedAlgos = async (instId: string, config: any): Promise<any[]> => {
+   if (config.isSimulation) return [];
    try {
-       // 地毯式查询该币种下所有待处理的策略委托
+       // 全量抓取，无差别扫描
        const algos = await fetchAlgoOrders(instId, config);
-       if (!algos || algos.length === 0) return 0;
+       if (!algos || algos.length === 0) return [];
 
-       // --- 核心优化：暴力清理幽灵单 ---
-       // 既然此币种持仓已确认为 0，我们撤销该 instId 下的“所有”挂起策略单
-       // 无论它是否标记为 reduceOnly，只要是策略单且没仓位了，它就不应该存在
+       // 强制清理该币种下的所有策略单，不设 reduceOnly 过滤
        const toCancel = algos.map((o: any) => ({ algoId: o.algoId, instId }));
        
        if (toCancel.length > 0) {
@@ -300,12 +298,21 @@ export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) =
            const headers = getHeaders('POST', path, body, config);
            const res = await fetch(BASE_URL + path, { method: 'POST', headers, body });
            const json = await res.json();
-           return json.code === '0' ? toCancel.length : 0;
+           
+           if (json.code === '0') {
+               // 返回详情列表用于日志
+               return algos.map(o => ({
+                   id: o.algoId,
+                   type: o.ordType,
+                   triggerPx: o.tpTriggerPx || o.slTriggerPx || '--',
+                   activePx: o.activePx || '--'
+               }));
+           }
        }
-       return 0;
+       return [];
    } catch (e: any) {
        console.error(`Purge failed for ${instId}:`, e.message);
-       return 0;
+       return [];
    }
 };
 
