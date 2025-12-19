@@ -30,9 +30,8 @@ let lastAnalysisTime = 0;
 let isProcessing = false;
 
 // --- Cleanup State ---
-let previousActiveInstIds: Set<string> = new Set();
 let lastCleanupTime = 0;
-const CLEANUP_INTERVAL = 15 * 1000; // 提高巡检频率至 15s
+const CLEANUP_INTERVAL = 15 * 1000; // 维持 15s 巡检
 
 const addLog = (type: SystemLog['type'], message: string) => {
   const log: SystemLog = { 
@@ -42,7 +41,7 @@ const addLog = (type: SystemLog['type'], message: string) => {
       message 
   };
   logs.push(log);
-  if (logs.length > 500) logs = logs.slice(-500); // 增加日志保存上限
+  if (logs.length > 500) logs = logs.slice(-500); 
   console.log(`[${type}] ${message}`);
 };
 
@@ -58,7 +57,7 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- 强化：残留委托清理 (GHOST PROTECTOR v2) ---
+        // --- 强化：幽灵单地毯式清理 (GHOST BUSTER v3) ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -66,24 +65,24 @@ const runTradingLoop = async () => {
                 .map(p => p.instId)
             );
 
-            // 1. 瞬间清理 (仓位由有变无)
-            for (const instId of previousActiveInstIds) {
-                if (!currentActiveInstIds.has(instId)) {
-                    addLog('INFO', `[${instId}] 检测到平仓，执行地毯式策略单清理(含移动止盈)...`);
-                    const count = await okxService.checkAndCancelOrphanedAlgos(instId, config);
-                    if (count > 0) addLog('SUCCESS', `[${instId}] 清理残留委托成功: ${count}个`);
-                }
-            }
-            previousActiveInstIds = currentActiveInstIds;
-
-            // 2. 持续巡检 (强制兜底清理任何无持仓币种的 reduceOnly 单)
+            // 每 15 秒强制巡检全币种，只要没仓位就强制清空所有策略委托
             if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
                 lastCleanupTime = Date.now();
                 const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
+                
                 for (const instId of allPossibleInstIds) {
                     if (!currentActiveInstIds.has(instId)) {
-                         // 即使没有状态转换，只要检测到无持仓且有策略单，强制清除
-                         await okxService.checkAndCancelOrphanedAlgos(instId, config);
+                        // 强制暴力清理该 instId 下所有策略单
+                        const purgedAlgos = await okxService.checkAndCancelOrphanedAlgos(instId, config);
+                        
+                        if (purgedAlgos.length > 0) {
+                            const coinName = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId) || instId;
+                            addLog('WARNING', `[${coinName}] 发现幽灵单！正在执行暴力清理...`);
+                            purgedAlgos.forEach(o => {
+                                addLog('INFO', `[${coinName}] 已清理: ID=${o.id} | 类型=${o.type} | 触发价=${o.triggerPx} | 激活价=${o.activePx}`);
+                            });
+                            addLog('SUCCESS', `[${coinName}] 清理完毕，共清除 ${purgedAlgos.length} 个残留委托单`);
+                        }
                     }
                 }
             }
@@ -92,11 +91,10 @@ const runTradingLoop = async () => {
         if (!isRunning) return;
         const now = Date.now();
         
-        // 动态调整分析频率
-        let intervalMs = 180000; // 默认3分钟一次
+        let intervalMs = 180000; 
         if (accountData && accountData.positions.length > 0) {
             const hasActivePos = accountData.positions.some(p => parseFloat(p.pos) > 0);
-            if (hasActivePos) intervalMs = 60000; // 有持仓时加密至1分钟
+            if (hasActivePos) intervalMs = 60000; 
         }
         
         if (now - lastAnalysisTime < intervalMs) return;
@@ -114,15 +112,11 @@ const runTradingLoop = async () => {
             if (decisionHistory.length > 1000) decisionHistory = decisionHistory.slice(0, 1000);
             
             const position = accountData.positions.find(p => p.instId === decision.instId);
-            
-            // --- 强化日志记录：无论动作如何，都记录 AI 的核心判断 ---
-            // 移除截断，显示完整 reasoning
             const logMsg = `[${decision.coin}] 状态: ${decision.action} | 分析: ${decision.reasoning}`;
             
             if (decision.action !== 'HOLD') {
                 addLog('INFO', logMsg);
             } else {
-                // HOLD 状态下的心跳日志，确保用户看到技术面状态
                 const marketBrief = decision.market_assessment.replace(/\n/g, ' ');
                 addLog('INFO', `[${decision.coin}] 监控中: ${marketBrief}`);
             }
