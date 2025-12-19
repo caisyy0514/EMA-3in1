@@ -1,6 +1,6 @@
 
 import { AccountBalance, CandleData, MarketDataCollection, PositionData, TickerData, AIDecision, AccountContext, SingleMarketData } from "../types";
-import { COIN_CONFIG, DEFAULT_LEVERAGE, MOCK_TICKER } from "../constants";
+import { COIN_CONFIG, DEFAULT_LEVERAGE, MOCK_TICKER, TAKER_FEE_RATE } from "../constants";
 import CryptoJS from 'crypto-js';
 
 const randomVariation = (base: number, percent: number) => {
@@ -100,8 +100,8 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        // 关键修复：显式请求 move_order_stop 和 conditional 类型的待处理策略单
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop`;
+        // 显式请求所有可能作为幽灵单存在的策略类型
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=conditional,oco,move_order_stop,trigger`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
@@ -211,12 +211,21 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
     const decimals = TICK_SIZE < 0.01 ? 4 : 2;
     const sizePrecision = MIN_SZ.toString().split('.')[1]?.length || 0;
 
+    // --- 核心优化：净利润 ROI 计算 ---
+    // 手续费双边损耗 (Taker 0.05% * 2 = 0.1%)
+    // 在本金 ROI 层面的损耗 = 损耗率 * 杠杆
+    const feeImpactOnROI = (TAKER_FEE_RATE * 2) * leverage;
+    
     const fmtPrice = (p: number) => p.toFixed(decimals);
-    const getTpPrice = (roi: number) => posSide === 'long' ? entryPrice * (1 + roi / leverage) : entryPrice * (1 - roi / leverage);
+    // 这里的 netRoi 为目标净利 (0.05 代表 5% 纯利)
+    const getTpPrice = (netRoi: number) => {
+        const grossRoi = netRoi + feeImpactOnROI;
+        return posSide === 'long' ? entryPrice * (1 + grossRoi / leverage) : entryPrice * (1 - grossRoi / leverage);
+    };
 
-    const p1 = fmtPrice(getTpPrice(0.05)); 
-    const p2 = fmtPrice(getTpPrice(0.08)); 
-    const p3 = fmtPrice(getTpPrice(0.12)); 
+    const p1 = fmtPrice(getTpPrice(0.05)); // 5% 净利
+    const p2 = fmtPrice(getTpPrice(0.08)); // 8% 净利
+    const p3 = fmtPrice(getTpPrice(0.12)); // 12% 净利
 
     let remaining = size;
     const calculateGreedySize = (pct: number) => {
@@ -248,6 +257,7 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
 
     const placeTrailing = async (activationPx: string, sz: number) => {
         if (sz < MIN_SZ) return;
+        // 移动止盈的回调幅度逻辑保持不变，确保追踪趋势
         const rawPriceCallback = 0.05 / leverage;
         const flooredCallback = Math.floor(rawPriceCallback * 1000) / 1000;
         const finalCallback = Math.max(0.001, flooredCallback);
@@ -275,21 +285,22 @@ const placeAlgoStrategy = async (instId: string, posSide: string, avgPx: string,
 export const checkAndCancelOrphanedAlgos = async (instId: string, config: any) => {
    if (config.isSimulation) return 0;
    try {
-       // 地毯式查询所有类型的策略委托
+       // 地毯式查询该币种下所有待处理的策略委托
        const algos = await fetchAlgoOrders(instId, config);
        if (!algos || algos.length === 0) return 0;
 
-       // 核心修复：清理所有 reduceOnly 的残留单，不限类型 (含 move_order_stop)
-       const orphans = algos.filter((o: any) => o.reduceOnly === 'true');
+       // --- 核心优化：暴力清理幽灵单 ---
+       // 既然此币种持仓已确认为 0，我们撤销该 instId 下的“所有”挂起策略单
+       // 无论它是否标记为 reduceOnly，只要是策略单且没仓位了，它就不应该存在
+       const toCancel = algos.map((o: any) => ({ algoId: o.algoId, instId }));
        
-       if (orphans.length > 0) {
-           const toCancel = orphans.map((o: any) => ({ algoId: o.algoId, instId }));
+       if (toCancel.length > 0) {
            const path = "/api/v5/trade/cancel-algos";
            const body = JSON.stringify(toCancel);
            const headers = getHeaders('POST', path, body, config);
            const res = await fetch(BASE_URL + path, { method: 'POST', headers, body });
            const json = await res.json();
-           return json.code === '0' ? orphans.length : 0;
+           return json.code === '0' ? toCancel.length : 0;
        }
        return 0;
    } catch (e: any) {
