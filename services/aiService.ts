@@ -292,7 +292,7 @@ const analyzeCoin = async (
             // --- STAGE LOGGING ---
             const hitStages: string[] = [];
             if (netRoi >= 0.05) hitStages.push("一(5%)");
-            if (netRoi >= 0.08) hitStages.push("二(8%)");
+            if (netRoi >= 0.078) hitStages.push("二(8% 触发缓冲)"); // ROI 判定缓冲 0.078
             if (netRoi >= 0.12) hitStages.push("三(12%)");
 
             if (hitStages.length > 0) {
@@ -300,13 +300,13 @@ const analyzeCoin = async (
             }
 
             // --- STAGE 2 MAINTENANCE: BREAK EVEN PROTECTION ---
-            // Rule: If Stage 2 passed (ROI >= 8%), Check Break Even
+            // Rule: If Stage 2 passed (ROI >= 7.8%), Check Break Even
             // 交易所止盈单只负责减仓，不负责改剩余仓位的止损，所以这里必须由AI执行。
-            if (netRoi >= 0.08) {
+            if (netRoi >= 0.078) {
                 const currentSL = parseFloat(p.slTriggerPx || "0");
                 const feeBuffer = avgEntry * 0.002;
                 
-                // FIX: Normalize bePrice precision to prevent infinite update loop due to float diff
+                // bePrice 精度严格归一化
                 let bePrice = isLong ? avgEntry + feeBuffer : avgEntry - feeBuffer;
                 bePrice = parseFloat(bePrice.toFixed(decimals)); 
                 
@@ -315,23 +315,22 @@ const analyzeCoin = async (
                 if (!isSecured) {
                     finalAction = "UPDATE_TPSL";
                     finalSL = bePrice.toFixed(decimals);
-                    invalidationReason = `[阶段二风控] ROI达标8%，系统强制调整止损至成本价(${finalSL})`;
+                    invalidationReason = `[阶段二风控] 净ROI达标，调整止损至成本价(${finalSL})`;
                 }
             }
             
             // --- STAGE 4 MONITORING ---
             // 尾仓追踪止损已在开仓时设置(Move Order Stop)，无需AI操作。
             if (netRoi >= 0.12) {
-                 invalidationReason += ` [尾仓追踪激活] ROI>12%，交易所移动止盈单已激活(回调5%出场)。`;
+                 invalidationReason += ` [尾仓追踪激活] ROI>12%，交易所移动止盈单已激活。`;
             }
         }
 
     } else {
         // --- NO POSITION: ENTRY LOGIC ---
-        // 保持原有的开仓判断不变: 3m 趋势下前一个反向交叉区间的极值
         if (entry3m.signal) {
             finalAction = entry3m.action;
-            finalSize = "15%"; // Rule: 15% of Total Account (Upgraded from 10%)
+            finalSize = "15%"; 
             finalSL = entry3m.sl.toFixed(decimals); 
             invalidationReason = `[开仓] 3m策略信号触发, 止损设为前一交叉极值(${finalSL})`;
         }
@@ -345,9 +344,7 @@ const analyzeCoin = async (
 
 **核心原则**:
 1. **净利润至上**: 所有收益评估必须扣除双边手续费(约0.1%)。
-2. **多阶段止盈 (交易所托管)**:
-   - 开仓后立即下达止盈委托，AI不再手动止盈。
-   - 阶段二(ROI≥8%)时，AI需负责将剩余仓位止损移动至成本价。
+2. **多阶段止盈 (交易所托管)**: 阶段二(ROI≥8%)时，AI需负责将剩余仓位止损移动至成本价；开仓后立即下达止盈委托。
 
 **策略规则**:
 1. **1H 趋势**:  ${trend1H.direction}
@@ -383,7 +380,7 @@ const analyzeCoin = async (
             instId: INST_ID,
             stage_analysis: "EMA严格趋势策略 (交易所全托管版)",
             market_assessment: `【1H趋势】：${tDirection}\n【3m入场】：${tEntry}`,
-            hot_events_overview: "策略配置已禁用热点分析", // Hardcoded per user request
+            hot_events_overview: "策略配置已禁用热点分析", 
             coin_analysis: `趋势: ${tDirection}。状态: ${posAnalysis}`,
             trading_decision: {
                 action: finalAction as any,
@@ -403,41 +400,25 @@ const analyzeCoin = async (
         try {
             const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
             const aiJson = JSON.parse(cleanText);
-            
-            // SANITIZATION: Ensure fields are strings to prevent React rendering crashes
-            const ensureString = (val: any) => {
-                if (typeof val === 'string') return val;
-                if (typeof val === 'object') return JSON.stringify(val);
-                return String(val || '');
-            };
-
+            const ensureString = (val: any) => (typeof val === 'string' ? val : String(val || ''));
             if(aiJson.market_assessment) decision.market_assessment = ensureString(aiJson.market_assessment);
-            // Force disable hot events overwrite
             decision.hot_events_overview = "策略配置已禁用热点分析";
             if(aiJson.coin_analysis) decision.coin_analysis = ensureString(aiJson.coin_analysis);
-            if(aiJson.reasoning) {
-                 const reasoningStr = ensureString(aiJson.reasoning);
-                 decision.reasoning = `${decision.reasoning} | AI视角: ${reasoningStr}`;
-            }
-
+            if(aiJson.reasoning) decision.reasoning = `${decision.reasoning} | AI视角: ${ensureString(aiJson.reasoning)}`;
         } catch (e) {
-            console.warn(`[${coinKey}] AI JSON parse failed, using local logic.`);
+            console.warn(`[${coinKey}] AI JSON parse failed.`);
         }
 
-        // --- SIZE CALCULATION (Strict Balance Check Logic with MinSz Quantization) ---
+        // --- SIZE CALCULATION (Strict Balance Check) ---
+        // 修正：UPDATE_TPSL 指令不需要进行 size 校验
         if (finalAction === 'BUY' || finalAction === 'SELL') {
             
             let contracts = 0;
             const leverage = parseFloat(DEFAULT_LEVERAGE); 
-            // OKX Margin = (Quantity * ContractVal * Price) / Leverage
             const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
             const minMarginRequired = marginPerContract * MIN_SZ;
 
-            // Determine if this is an OPEN (Increase) or CLOSE (Reduce) action
             let isClose = false;
-            // Simplified check: If we have a position and action opposes it -> Close. 
-            // If we have position and action matches -> Add (Open).
-            // If no position -> Open.
             if (hasPosition) {
                 const p = primaryPosition!;
                 if (p.posSide === 'long' && finalAction === 'SELL') isClose = true;
@@ -447,103 +428,69 @@ const analyzeCoin = async (
             let calcDetails = "";
 
             if (!isClose) {
-                // === NEW STRICT OPENING GUARANTEE MECHANISM ===
-                
-                // 1. Calculate Target Strategy Size
                 let targetContracts = 0;
                 let rawContracts = 0;
                 
                 if (finalSize.includes('%')) {
                     const pct = parseFloat(finalSize) / 100; 
-                    // Strategy Amount in USDT (Margin allocation)
                     const strategyMarginAlloc = totalEquity * pct;
                     rawContracts = strategyMarginAlloc / marginPerContract;
                 } else {
                     rawContracts = parseFloat(finalSize);
                 }
 
-                // Quantize based on MIN_SZ (Replacing Math.floor)
-                // Using formula: Math.floor(raw / MIN_SZ) * MIN_SZ to handle both integer and decimal minSz
                 let targetContractsFormatted = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
-                
-                // Fix JS floating point precision (e.g. 0.15000000002)
                 const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
                 targetContracts = parseFloat(targetContractsFormatted.toFixed(precision));
 
                 const targetMargin = targetContracts * marginPerContract;
-
-                // 2. Strict Check & Guarantee Logic
-                // Log the calculation variables
                 const openValUSDT = targetContracts * CONTRACT_VAL * currentPrice;
-                calcDetails = `[决策测算] 目标: ${targetContracts}张 (合约价值${openValUSDT.toFixed(1)}U), 杠杆: ${leverage}x, 需保证金: ${targetMargin.toFixed(2)}U, 可用: ${availEquity.toFixed(2)}U`;
+                calcDetails = `[测算] 目标: ${targetContracts}张 (价值${openValUSDT.toFixed(1)}U), 需保证金: ${targetMargin.toFixed(2)}U, 可用: ${availEquity.toFixed(2)}U`;
 
                 if (availEquity >= targetMargin && targetContracts >= MIN_SZ) {
-                    // [Normal] Funds sufficient AND Size >= Min
                     contracts = targetContracts;
-                    calcDetails += ` -> [资金充足] 按策略执行`;
+                    calcDetails += ` -> 资金充足`;
                 } else {
-                    // [Exception] Funds Insufficient OR Size < Min
-                    // Strictly check if Min Size is affordable
                     if (availEquity >= minMarginRequired) {
                          contracts = MIN_SZ;
-                         const reason = availEquity < targetMargin ? "余额不足策略量" : "策略量小于最小单位";
-                         calcDetails += ` -> [保底触发] ${reason}, 严谨执行最小开仓(${MIN_SZ}张, 需${minMarginRequired.toFixed(2)}U)`;
+                         calcDetails += ` -> 保底执行最小开仓`;
                     } else {
-                         // [Fail] Not enough for even Min Size
                          contracts = 0;
                          decision.action = 'HOLD';
-                         calcDetails += ` -> [资金不足] 无法满足最小保底保证金(${minMarginRequired.toFixed(2)}U), 放弃开仓`;
+                         calcDetails += ` -> 保证金不足最小单位`;
                     }
                 }
             } else {
-                // === CLOSING LOGIC (Standard) ===
                 let rawContracts = parseFloat(finalSize);
-                
-                // Quantize Closing Size
                 let targetContractsFormatted = Math.floor(rawContracts / MIN_SZ) * MIN_SZ;
                 const precision = MIN_SZ.toString().split('.')[1]?.length || 0;
                 contracts = parseFloat(targetContractsFormatted.toFixed(precision));
-                
-                // Safety check: Don't close more than held
                 const held = hasPosition ? parseFloat(primaryPosition!.pos) : 0;
-                
                 if (contracts < MIN_SZ) {
-                    if (held < MIN_SZ) {
-                        contracts = held; // Close dust (assuming allowed if exact match)
-                    } else if (contracts > 0) {
-                        contracts = MIN_SZ; // Round up to min size if > 0
-                    }
+                    if (held < MIN_SZ) contracts = held;
+                    else if (contracts > 0) contracts = MIN_SZ;
                 }
-                
-                // Ensure we don't exceed holding
                 if (contracts > held) contracts = held;
-                
-                // Format for logging
                 contracts = parseFloat(contracts.toFixed(precision));
-                calcDetails = `[平仓执行] 计划平: ${contracts}张, 持仓: ${held}张`;
+                calcDetails = `[平仓] 计划: ${contracts}张, 持仓: ${held}张`;
             }
 
-            // 3. Finalize Decision
             if (contracts > 0 && decision.action !== 'HOLD') {
                 decision.size = contracts.toString();
-                // Append detailed calculation to reasoning
                 decision.reasoning += ` || ${calcDetails}`;
-                
-                // Update structured data for "Checkability"
-                if (decision.trading_decision) {
-                    decision.trading_decision.position_size = contracts.toString();
-                }
+                if (decision.trading_decision) decision.trading_decision.position_size = contracts.toString();
             } else if (decision.action !== 'HOLD' && !isClose) {
-                // Action cancelled due to funds
                 decision.action = 'HOLD';
                 decision.reasoning += ` || ${calcDetails}`;
             }
+        } else if (finalAction === 'UPDATE_TPSL') {
+            // 指令已就绪，保持 decision.action 为 UPDATE_TPSL，不需要 size 校验
+            decision.size = "0";
         }
 
         return decision;
 
     } catch (error: any) {
-        console.error(`Strategy Error for ${coinKey}:`, error);
         return {
             coin: coinKey,
             instId: INST_ID,
@@ -567,9 +514,6 @@ export const getTradingDecision = async (
     accountData: AccountContext,
     logs: SystemLog[]
 ): Promise<AIDecision[]> => {
-    // Disabled News Fetching to save tokens
-    // const newsContext = await fetchRealTimeNews();
-
     const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
         if (!marketData[coinKey]) return null;
         return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, logs);
