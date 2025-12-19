@@ -57,7 +57,7 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- 核心：地毯式幽灵单审计逻辑 ---
+        // --- 核心：地毯式幽灵单审计逻辑 (加固版) ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -69,28 +69,32 @@ const runTradingLoop = async () => {
                 lastCleanupTime = Date.now();
                 const allPossibleInstIds = Object.values(COIN_CONFIG).map(c => c.instId);
                 
+                let totalFound = 0;
+                let auditedCoins: string[] = [];
+
                 for (const instId of allPossibleInstIds) {
                     const coinName = Object.keys(COIN_CONFIG).find(k => COIN_CONFIG[k].instId === instId) || instId;
+                    auditedCoins.push(coinName);
                     
                     if (!currentActiveInstIds.has(instId)) {
-                        // 启动深度扫描审计
-                        addLog('INFO', `[审计] 检查 ${coinName} 是否有残留幽灵单...`);
-                        
+                        // 执行强制撤单动作 (API 层已加固 instType=SWAP)
                         const purgedAlgos = await okxService.checkAndCancelOrphanedAlgos(instId, config);
                         
                         if (purgedAlgos.length > 0) {
+                            totalFound += purgedAlgos.length;
                             addLog('WARNING', `[${coinName}] 确认为幽灵单！正在强制爆破清理...`);
                             purgedAlgos.forEach(o => {
-                                // 详细输出每一个幽灵单的类型，帮助用户复盘
                                 const typeLabel = o.type === 'move_order_stop' ? '移动止盈止损' : (o.type === 'conditional' ? '止盈止损条件单' : o.type);
                                 addLog('INFO', `[${coinName}] 清理明细: ID=${o.id} | 类型=${typeLabel} | 激活价=${o.activePx} | 回调=${o.callback}`);
                             });
                             addLog('SUCCESS', `[${coinName}] 幽灵单清理成功，共清除 ${purgedAlgos.length} 个残留项`);
-                        } else {
-                            // 审计通过，该币种无残留
-                            console.log(`[审计] ${coinName} 状态干净，无残留策略委托。`);
                         }
                     }
+                }
+
+                // 合并输出审计概况，只有发现幽灵单时才展开详细日志，平时仅输出概况
+                if (totalFound === 0) {
+                    addLog('INFO', `[系统审计] 扫描完毕 (${auditedCoins.join(', ')}): 未发现残留订单，状态洁净。`);
                 }
             }
         }
@@ -195,5 +199,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Trading Server running on port ${PORT}`);
-    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。审计引擎已挂载。');
+    addLog('INFO', 'EMA 3in1 Pro 系统初始化完毕。幽灵单审计引擎已强化。');
 });
