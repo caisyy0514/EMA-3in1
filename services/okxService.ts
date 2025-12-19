@@ -100,10 +100,9 @@ export const fetchMarketData = async (config: any): Promise<MarketDataCollection
 const fetchAlgoOrders = async (instId: string, config: any): Promise<any[]> => {
     if (config.isSimulation) return [];
     try {
-        // 核心加固：显式请求所有关键类型，防止 OKX 默认仅返回 conditional
-        // 包含：条件单 (conditional), 触发单 (trigger), 移动止盈止损 (move_order_stop)
+        // 核心加固：必须显式指定 instType=SWAP，否则 OKX 默认查询现货
         const types = "conditional,move_order_stop,trigger";
-        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&ordType=${types}`;
+        const path = `/api/v5/trade/orders-algo-pending?instId=${instId}&instType=SWAP&ordType=${types}`;
         const headers = getHeaders('GET', path, '', config);
         const res = await fetch(BASE_URL + path, { method: 'GET', headers });
         const json = await res.json();
