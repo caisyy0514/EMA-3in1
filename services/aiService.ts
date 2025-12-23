@@ -24,7 +24,7 @@ const callDeepSeek = async (apiKey: string, messages: any[]) => {
                 model: "deepseek-chat",
                 messages: messages,
                 stream: false,
-                temperature: 0.1, // Very low temp for strict logic
+                temperature: 0.1, 
                 max_tokens: 4096,
                 response_format: { type: 'json_object' }
             })
@@ -91,23 +91,30 @@ function analyze1HTrend(candles: CandleData[]) {
     return { direction: 'NEUTRAL', timestamp: parseInt(latest.ts), description: "震荡整理 (均线纠缠中)" };
 }
 
-function analyze3mEntry(candles: CandleData[], trendDirection: string) {
+/**
+ * 核心优化：结构止损 + 杠杆风险限额止损
+ */
+function analyze3mEntry(candles: CandleData[], trendDirection: string, currentPrice: number, leverage: number) {
     if (candles.length < 100) return { signal: false, action: 'HOLD', sl: 0, reason: "数据不足", structure: "分析中" };
     
     const curr = candles[candles.length - 1] as any;
-    
     if (!curr.ema15 || !curr.ema60) {
          return { signal: false, action: 'HOLD', sl: 0, reason: "指标数据不足", structure: "分析中" };
     }
     
     const currentGold = curr.ema15 > curr.ema60;
     const structure = currentGold ? "金叉区域" : "死叉区域";
-    
     const TOLERANCE_CANDLES = 5; 
+
+    // 杠杆风险限额计算 (10% 保证金损耗对应的价格位)
+    const riskDistancePct = 0.1 / leverage;
+    const longHardSL = currentPrice * (1 - riskDistancePct);
+    const shortHardSL = currentPrice * (1 + riskDistancePct);
 
     if (trendDirection === 'UP') {
         if (currentGold) {
             let crossIndex = -1;
+            // 找到最新的金叉点
             for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
                 const p = candles[i-1] as any;
@@ -121,21 +128,35 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
             if (crossIndex !== -1) {
                 const candlesSinceCross = (candles.length - 1) - crossIndex;
                 if (candlesSinceCross <= TOLERANCE_CANDLES) {
-                    let lowestInZone = parseFloat(candles[crossIndex - 1].l);
-                    let lookbackLimit = 150; 
-                    for (let i = crossIndex - 1; i >= 0 && lookbackLimit > 0; i--) {
+                    // 1. 结构均值止损：回溯金叉前【紧邻的一个连续死叉区间】
+                    let sumLow = 0;
+                    let count = 0;
+                    let foundStart = false;
+
+                    for (let i = crossIndex - 1; i >= 0; i--) {
                         const c = candles[i] as any;
-                        if (c.ema15 <= c.ema60) {
-                            const l = parseFloat(c.l);
-                            if (l < lowestInZone) lowestInZone = l;
-                        } else { break; }
-                        lookbackLimit--;
+                        if (c.ema15 < c.ema60) {
+                            sumLow += parseFloat(c.l);
+                            count++;
+                            foundStart = true;
+                        } else if (foundStart) {
+                            // 已经越过了死叉区间进入上上个区间，停止
+                            break;
+                        }
+                        if (count > 50) break; // 保护，防止极端行情回溯过多
                     }
+
+                    const structuralAvgSL = count > 0 ? sumLow / count : parseFloat(candles[crossIndex-1].l);
+                    
+                    // 2. 最终止损取：离当前价更近的那一个（风险更小）
+                    const finalSL = Math.max(structuralAvgSL, longHardSL);
+                    const isHardCap = longHardSL > structuralAvgSL;
+
                     return { 
                         signal: true, 
                         action: 'BUY', 
-                        sl: lowestInZone, 
-                        reason: `3m金叉确认 (第${candlesSinceCross}根K线)`,
+                        sl: finalSL, 
+                        reason: `3m金叉确认 (第${candlesSinceCross}根) | 止损参考: ${isHardCap ? '杠杆限额' : '结构均值'}`,
                         structure: "满足入场"
                     };
                 }
@@ -147,6 +168,7 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
     if (trendDirection === 'DOWN') {
         if (!currentGold) {
              let crossIndex = -1;
+             // 找到最新的死叉点
              for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
                 const p = candles[i-1] as any;
@@ -160,21 +182,34 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string) {
              if (crossIndex !== -1) {
                  const candlesSinceCross = (candles.length - 1) - crossIndex;
                  if (candlesSinceCross <= TOLERANCE_CANDLES) {
-                     let highestInZone = parseFloat(candles[crossIndex - 1].h);
-                     let lookbackLimit = 150;
-                     for (let i = crossIndex - 1; i >= 0 && lookbackLimit > 0; i--) {
+                     // 1. 结构均值止损：回溯死叉前【紧邻的一个连续金叉区间】
+                     let sumHigh = 0;
+                     let count = 0;
+                     let foundStart = false;
+
+                     for (let i = crossIndex - 1; i >= 0; i--) {
                          const c = candles[i] as any;
-                         if (c.ema15 >= c.ema60) {
-                             const h = parseFloat(c.h);
-                             if (h > highestInZone) highestInZone = h;
-                         } else { break; }
-                         lookbackLimit--;
+                         if (c.ema15 > c.ema60) {
+                             sumHigh += parseFloat(c.h);
+                             count++;
+                             foundStart = true;
+                         } else if (foundStart) {
+                             break;
+                         }
+                         if (count > 50) break;
                      }
+
+                     const structuralAvgSL = count > 0 ? sumHigh / count : parseFloat(candles[crossIndex-1].h);
+                     
+                     // 2. 最终止损取：离当前价更近的那一个（风险更小）
+                     const finalSL = Math.min(structuralAvgSL, shortHardSL);
+                     const isHardCap = shortHardSL < structuralAvgSL;
+
                      return { 
                         signal: true, 
                         action: 'SELL', 
-                        sl: highestInZone, 
-                        reason: `3m死叉确认 (第${candlesSinceCross}根K线)`,
+                        sl: finalSL, 
+                        reason: `3m死叉确认 (第${candlesSinceCross}根) | 止损参考: ${isHardCap ? '杠杆限额' : '结构均值'}`,
                         structure: "满足入场"
                     };
                  }
@@ -206,8 +241,11 @@ export const analyzeCoin = async (
     const totalEquity = parseFloat(accountData.balance.totalEq);
     const availEquity = parseFloat(accountData.balance.availEq || "0");
     
+    // 获取当前策略杠杆
+    const leverage = parseFloat(DEFAULT_LEVERAGE);
+
     const trend1H = analyze1HTrend(marketData.candles1H);
-    const entry3m = analyze3mEntry(marketData.candles3m, trend1H.direction);
+    const entry3m = analyze3mEntry(marketData.candles3m, trend1H.direction, currentPrice, leverage);
     
     const primaryPosition = accountData.positions.find(p => p.instId === INST_ID);
     const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
@@ -242,6 +280,7 @@ export const analyzeCoin = async (
         }
 
         if (finalAction === 'HOLD') {
+            // 阶段二风控：当净ROI 超过 7.8% 时，强行移动止损至保本位（覆盖手续费）
             if (netRoi >= 0.078) {
                 const currentSL = parseFloat(p.slTriggerPx || "0");
                 const feeBuffer = avgEntry * 0.002;
@@ -252,14 +291,14 @@ export const analyzeCoin = async (
                 if (!isSecured) {
                     finalAction = "UPDATE_TPSL";
                     finalSL = bePrice.toFixed(decimals);
-                    invalidationReason = `阶段二风控:净利达标,移动止损至成本价(${finalSL})`;
+                    invalidationReason = `移动止损(BE):净利达标,锁定利润,止损至 ${finalSL}`;
                 }
             }
         }
     } else {
         if (entry3m.signal) {
             finalAction = entry3m.action;
-            finalSize = "15%"; 
+            finalSize = "15%"; // 默认入场比例
             finalSL = entry3m.sl.toFixed(decimals); 
             invalidationReason = entry3m.reason;
         }
@@ -292,7 +331,6 @@ export const analyzeCoin = async (
 
     // 资金计算逻辑 (仅对交易指令有效)
     if (finalAction === 'BUY' || finalAction === 'SELL') {
-        const leverage = parseFloat(DEFAULT_LEVERAGE); 
         const marginPerContract = (CONTRACT_VAL * currentPrice) / leverage;
         const minMarginRequired = marginPerContract * MIN_SZ;
         
