@@ -49,6 +49,7 @@ const runTradingLoop = async () => {
     if (isProcessing) return;
     isProcessing = true;
     try {
+        // 每 5 秒更新一次基础行情，确保 UI 实时性
         try {
             marketData = await okxService.fetchMarketData(config);
             accountData = await okxService.fetchAccountData(config);
@@ -94,18 +95,24 @@ const runTradingLoop = async () => {
         if (!isRunning) return;
         const now = Date.now();
         
-        let intervalMs = 180000; 
+        /**
+         * 核心优化：高频扫描频率设定
+         * 空仓时：15秒扫描一次（原 180s），捕捉转瞬即逝的交叉信号
+         * 持仓时：10秒扫描一次（原 60s），确保移动止损和趋势反转监控毫秒级响应
+         */
+        let intervalMs = 15000; 
         if (accountData && accountData.positions.length > 0) {
             const hasActivePos = accountData.positions.some(p => parseFloat(p.pos) > 0);
-            if (hasActivePos) intervalMs = 60000; 
+            if (hasActivePos) intervalMs = 10000; 
         }
         
+        // 判定是否到达分析周期
         if (now - lastAnalysisTime < intervalMs) return;
         lastAnalysisTime = now;
         
         if (!marketData || !accountData) return;
 
-        addLog('INFO', `>>> 引擎启动行情扫描 (周期: ${intervalMs/1000}s) <<<`);
+        addLog('INFO', `>>> 引擎启动策略扫描 (本地算力, 周期: ${intervalMs/1000}s) <<<`);
         const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
         
         for (const decision of decisions) {
@@ -121,8 +128,8 @@ const runTradingLoop = async () => {
             const entryTag = decision.market_assessment.split('\n')[1]?.replace('【3m入场】：', '') || '未就绪';
             
             if (decision.action === 'HOLD') {
-                // HOLD 状态显示战略评估摘要
-                addLog('INFO', `[${decision.coin}] 趋势:${trendTag} | 状态:${entryTag} | 结论:继续观察`);
+                // HOLD 状态静默记录到控制台，减少 UI 日志冗余，仅保留关键变动
+                console.log(`[分析中][${decision.coin}] 趋势:${trendTag} | 状态:${entryTag}`);
             } else if (decision.action === 'UPDATE_TPSL') {
                 addLog('TRADE', `[${decision.coin}] 策略调整: 净ROI达标，准备将止损移动至成本价 (${decision.trading_decision.stop_loss})`);
             } else {
@@ -162,6 +169,7 @@ const runTradingLoop = async () => {
     }
 };
 
+// 保持 5 秒一次的主循环心跳，分析周期在内部由 intervalMs 控制
 setInterval(runTradingLoop, 5000);
 
 app.get('/api/status', (req, res) => {
