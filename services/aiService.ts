@@ -92,13 +92,14 @@ function analyze1HTrend(candles: CandleData[]) {
 }
 
 /**
- * 核心优化：结构止损 + 杠杆风险限额止损
+ * 核心优化：动能前瞻 (Momentum Lead) + 均线确认双轨入场逻辑
  */
 function analyze3mEntry(candles: CandleData[], trendDirection: string, currentPrice: number, leverage: number) {
     if (candles.length < 100) return { signal: false, action: 'HOLD', sl: 0, reason: "数据不足", structure: "分析中" };
     
     const curr = candles[candles.length - 1] as any;
-    if (!curr.ema15 || !curr.ema60) {
+    const prev = candles[candles.length - 2] as any;
+    if (!curr.ema15 || !curr.ema60 || !prev.ema15) {
          return { signal: false, action: 'HOLD', sl: 0, reason: "指标数据不足", structure: "分析中" };
     }
     
@@ -106,15 +107,48 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string, currentPr
     const structure = currentGold ? "金叉区域" : "死叉区域";
     const TOLERANCE_CANDLES = 5; 
 
-    // 杠杆风险限额计算 (10% 保证金损耗对应的价格位)
-    const riskDistancePct = 0.1 / leverage;
+    // --- 0. 基础风险计算 ---
+    const riskDistancePct = 0.1 / leverage; // 10% 保证金损耗
     const longHardSL = currentPrice * (1 - riskDistancePct);
     const shortHardSL = currentPrice * (1 + riskDistancePct);
 
+    // --- 1. 动能前瞻计算 (Momentum Lead Indicators) ---
+    const currentGap = Math.abs(curr.ema15 - curr.ema60);
+    const prevGap = Math.abs(prev.ema15 - prev.ema60);
+    const ema15Slope = curr.ema15 - prev.ema15;
+    
+    // 成交量异动检测 (过去5根均值的 1.5 倍)
+    let totalVol = 0;
+    const volLookback = 5;
+    for (let i = candles.length - 2; i >= candles.length - (volLookback + 1); i--) {
+        totalVol += parseFloat(candles[i].vol);
+    }
+    const avgVol = totalVol / volLookback;
+    const isVolPulse = parseFloat(curr.vol) > avgVol * 1.5;
+
+    // --- 2. 多头策略分支 (1H UP) ---
     if (trendDirection === 'UP') {
+        // A. 抢跑入场 (死叉中，但价格已突围)
+        if (!currentGold) {
+            const isPriceBreakout = currentPrice > curr.ema15 && currentPrice > curr.ema60;
+            const isConverging = currentGap < prevGap;
+            const isUpturning = ema15Slope > 0;
+
+            if (isPriceBreakout && isConverging && isUpturning && isVolPulse) {
+                // 前瞻止损：信号 K 线低点 vs 杠杆限额
+                const signalLow = parseFloat(curr.l);
+                const finalSL = Math.max(signalLow, longHardSL);
+                return {
+                    signal: true, action: 'BUY', sl: finalSL,
+                    reason: `3m 动能前瞻 (价格先行+间距收敛+放量)`,
+                    structure: "抢跑入场"
+                };
+            }
+        }
+
+        // B. 确认入场 (金叉窗口期)
         if (currentGold) {
             let crossIndex = -1;
-            // 找到最新的金叉点
             for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
                 const p = candles[i-1] as any;
@@ -128,47 +162,55 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string, currentPr
             if (crossIndex !== -1) {
                 const candlesSinceCross = (candles.length - 1) - crossIndex;
                 if (candlesSinceCross <= TOLERANCE_CANDLES) {
-                    // 1. 结构均值止损：回溯金叉前【紧邻的一个连续死叉区间】
+                    // 结构均值止损：回溯最新死叉区间的最低价均值
                     let sumLow = 0;
                     let count = 0;
                     let foundStart = false;
-
                     for (let i = crossIndex - 1; i >= 0; i--) {
                         const c = candles[i] as any;
                         if (c.ema15 < c.ema60) {
                             sumLow += parseFloat(c.l);
                             count++;
                             foundStart = true;
-                        } else if (foundStart) {
-                            // 已经越过了死叉区间进入上上个区间，停止
-                            break;
-                        }
-                        if (count > 50) break; // 保护，防止极端行情回溯过多
+                        } else if (foundStart) break;
+                        if (count > 50) break;
                     }
-
                     const structuralAvgSL = count > 0 ? sumLow / count : parseFloat(candles[crossIndex-1].l);
-                    
-                    // 2. 最终止损取：离当前价更近的那一个（风险更小）
                     const finalSL = Math.max(structuralAvgSL, longHardSL);
-                    const isHardCap = longHardSL > structuralAvgSL;
-
                     return { 
-                        signal: true, 
-                        action: 'BUY', 
-                        sl: finalSL, 
-                        reason: `3m金叉确认 (第${candlesSinceCross}根) | 止损参考: ${isHardCap ? '杠杆限额' : '结构均值'}`,
+                        signal: true, action: 'BUY', sl: finalSL, 
+                        reason: `3m 金叉确认 (第${candlesSinceCross}根) | 止损参考: ${finalSL === longHardSL ? '杠杆限额' : '结构均值'}`,
                         structure: "满足入场"
                     };
                 }
             }
         }
-        return { signal: false, action: 'HOLD', sl: 0, reason: currentGold ? "金叉已过窗口期" : "等待金叉信号", structure };
+        return { signal: false, action: 'HOLD', sl: 0, reason: currentGold ? "金叉已过窗口期" : "等待金叉或前瞻信号", structure };
     }
     
+    // --- 3. 空头策略分支 (1H DOWN) ---
     if (trendDirection === 'DOWN') {
+        // A. 抢跑入场 (金叉中，但价格已击穿)
+        if (currentGold) {
+            const isPriceBreakdown = currentPrice < curr.ema15 && currentPrice < curr.ema60;
+            const isConverging = currentGap < prevGap;
+            const isDownturning = ema15Slope < 0;
+
+            if (isPriceBreakdown && isConverging && isDownturning && isVolPulse) {
+                // 前瞻止损：信号 K 线高点 vs 杠杆限额
+                const signalHigh = parseFloat(curr.h);
+                const finalSL = Math.min(signalHigh, shortHardSL);
+                return {
+                    signal: true, action: 'SELL', sl: finalSL,
+                    reason: `3m 动能前瞻 (价格跌破+间距收敛+放量)`,
+                    structure: "抢跑入场"
+                };
+            }
+        }
+
+        // B. 确认入场 (死叉窗口期)
         if (!currentGold) {
              let crossIndex = -1;
-             // 找到最新的死叉点
              for (let i = candles.length - 1; i > 0; i--) {
                 const c = candles[i] as any;
                 const p = candles[i-1] as any;
@@ -182,40 +224,30 @@ function analyze3mEntry(candles: CandleData[], trendDirection: string, currentPr
              if (crossIndex !== -1) {
                  const candlesSinceCross = (candles.length - 1) - crossIndex;
                  if (candlesSinceCross <= TOLERANCE_CANDLES) {
-                     // 1. 结构均值止损：回溯死叉前【紧邻的一个连续金叉区间】
+                     // 结构均值止损：回溯最新金叉区间的最高价均值
                      let sumHigh = 0;
                      let count = 0;
                      let foundStart = false;
-
                      for (let i = crossIndex - 1; i >= 0; i--) {
                          const c = candles[i] as any;
                          if (c.ema15 > c.ema60) {
                              sumHigh += parseFloat(c.h);
                              count++;
                              foundStart = true;
-                         } else if (foundStart) {
-                             break;
-                         }
+                         } else if (foundStart) break;
                          if (count > 50) break;
                      }
-
                      const structuralAvgSL = count > 0 ? sumHigh / count : parseFloat(candles[crossIndex-1].h);
-                     
-                     // 2. 最终止损取：离当前价更近的那一个（风险更小）
                      const finalSL = Math.min(structuralAvgSL, shortHardSL);
-                     const isHardCap = shortHardSL < structuralAvgSL;
-
                      return { 
-                        signal: true, 
-                        action: 'SELL', 
-                        sl: finalSL, 
-                        reason: `3m死叉确认 (第${candlesSinceCross}根) | 止损参考: ${isHardCap ? '杠杆限额' : '结构均值'}`,
+                        signal: true, action: 'SELL', sl: finalSL, 
+                        reason: `3m 死叉确认 (第${candlesSinceCross}根) | 止损参考: ${finalSL === shortHardSL ? '杠杆限额' : '结构均值'}`,
                         structure: "满足入场"
                     };
                  }
              }
         }
-        return { signal: false, action: 'HOLD', sl: 0, reason: !currentGold ? "死叉已过窗口期" : "等待死叉信号", structure };
+        return { signal: false, action: 'HOLD', sl: 0, reason: !currentGold ? "死叉已过窗口期" : "等待死叉或前瞻信号", structure };
     }
     
     return { signal: false, action: 'HOLD', sl: 0, reason: "1H大趋势不明确，暂不交易", structure };
