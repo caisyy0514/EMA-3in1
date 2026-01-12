@@ -49,7 +49,6 @@ const runTradingLoop = async () => {
     if (isProcessing) return;
     isProcessing = true;
     try {
-        // 每 5 秒更新一次基础行情，确保 UI 实时性
         try {
             marketData = await okxService.fetchMarketData(config);
             accountData = await okxService.fetchAccountData(config);
@@ -58,7 +57,6 @@ const runTradingLoop = async () => {
             return;
         }
 
-        // --- 幽灵单审计逻辑 ---
         if (accountData && !config.isSimulation) {
             const currentActiveInstIds = new Set(
                 accountData.positions
@@ -86,34 +84,25 @@ const runTradingLoop = async () => {
                         }
                     }
                 }
-                if (totalFound === 0 && auditedCoins.length > 0) {
-                    console.log(`[静默审计] 账户环境洁净: ${auditedCoins.join(', ')}`);
-                }
             }
         }
 
         if (!isRunning) return;
         const now = Date.now();
         
-        /**
-         * 核心优化：高频扫描频率设定
-         * 空仓时：15秒扫描一次（原 180s），捕捉转瞬即逝的交叉信号
-         * 持仓时：10秒扫描一次（原 60s），确保移动止损和趋势反转监控毫秒级响应
-         */
         let intervalMs = 15000; 
         if (accountData && accountData.positions.length > 0) {
             const hasActivePos = accountData.positions.some(p => parseFloat(p.pos) > 0);
             if (hasActivePos) intervalMs = 10000; 
         }
         
-        // 判定是否到达分析周期
         if (now - lastAnalysisTime < intervalMs) return;
         lastAnalysisTime = now;
         
         if (!marketData || !accountData) return;
 
-        addLog('INFO', `>>> 引擎启动策略扫描 (本地算力, 周期: ${intervalMs/1000}s) <<<`);
-        const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs);
+        addLog('INFO', `>>> 引擎启动策略扫描 (准入名单: ${(config.enabledCoins || []).join(', ')}) <<<`);
+        const decisions = await aiService.getTradingDecision(config.deepseekApiKey, marketData, accountData, logs, config.enabledCoins);
         
         for (const decision of decisions) {
             decision.timestamp = Date.now();
@@ -123,12 +112,10 @@ const runTradingLoop = async () => {
             
             const position = accountData.positions.find(p => p.instId === decision.instId);
             
-            // 构建详细版扫描日志
             const trendTag = decision.market_assessment.split('\n')[0].replace('【1H趋势】：', '') || '未知';
             const entryTag = decision.market_assessment.split('\n')[1]?.replace('【3m入场】：', '') || '未就绪';
             
             if (decision.action === 'HOLD') {
-                // HOLD 状态静默记录到控制台，减少 UI 日志冗余，仅保留关键变动
                 console.log(`[分析中][${decision.coin}] 趋势:${trendTag} | 状态:${entryTag}`);
             } else if (decision.action === 'UPDATE_TPSL') {
                 addLog('TRADE', `[${decision.coin}] 策略调整: 净ROI达标，准备将止损移动至成本价 (${decision.trading_decision.stop_loss})`);
@@ -136,7 +123,6 @@ const runTradingLoop = async () => {
                 addLog('TRADE', `[${decision.coin}] 信号触发: ${decision.action} | 理由: ${decision.reasoning}`);
             }
 
-            // 执行逻辑
             if (decision.action === 'UPDATE_TPSL') {
                 if (position) {
                     const newSL = decision.trading_decision.stop_loss;
@@ -169,7 +155,6 @@ const runTradingLoop = async () => {
     }
 };
 
-// 保持 5 秒一次的主循环心跳，分析周期在内部由 intervalMs 控制
 setInterval(runTradingLoop, 5000);
 
 app.get('/api/status', (req, res) => {
