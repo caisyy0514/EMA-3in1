@@ -196,7 +196,8 @@ export const analyzeCoin = async (
     apiKey: string,
     marketData: SingleMarketData,
     accountData: AccountContext,
-    logs: SystemLog[]
+    logs: SystemLog[],
+    isEnabled: boolean = true
 ): Promise<AIDecision> => {
     
     const config = COIN_CONFIG[coinKey];
@@ -217,6 +218,16 @@ export const analyzeCoin = async (
     
     const primaryPosition = accountData.positions.find(p => p.instId === INST_ID);
     const hasPosition = !!primaryPosition && parseFloat(primaryPosition.pos) > 0;
+
+    // --- Asset Admission Control ---
+    if (!isEnabled && !hasPosition) {
+        return {
+            coin: coinKey, instId: INST_ID, stage_analysis: "已禁用", market_assessment: "币种交易开关已关闭",
+            hot_events_overview: "N/A", coin_analysis: "币种已从准入名单中移除", action: 'HOLD', size: "0", leverage: DEFAULT_LEVERAGE,
+            reasoning: "[币种已禁用] 停止所有开新仓尝试",
+            trading_decision: { action: 'HOLD', confidence: "0%", position_size: "0", leverage: DEFAULT_LEVERAGE, profit_target: "", stop_loss: "", invalidation_condition: "币种已禁用" }
+        };
+    }
     
     let posAnalysis = "无持仓";
     let finalAction = "HOLD";
@@ -260,11 +271,14 @@ export const analyzeCoin = async (
             }
         }
     } else {
-        if (entry3m.signal) {
+        // Only trigger entry if enabled
+        if (isEnabled && entry3m.signal) {
             finalAction = entry3m.action;
             finalSize = "15%"; 
             finalSL = entry3m.sl.toFixed(decimals); 
             invalidationReason = entry3m.reason;
+        } else if (!isEnabled) {
+            invalidationReason = "[币种已禁用] 拒绝新开仓信号";
         }
     }
 
@@ -274,7 +288,7 @@ export const analyzeCoin = async (
     let decision: AIDecision = {
         coin: coinKey,
         instId: INST_ID,
-        stage_analysis: "EMA严格趋势追踪策略",
+        stage_analysis: isEnabled ? "EMA严格趋势追踪策略" : "EMA趋势策略 (限制模式: 仅平仓)",
         market_assessment: `【1H趋势】：${tDirection}\n【3m入场】：${tEntry}`,
         hot_events_overview: "未启用实时热点", 
         coin_analysis: `状态: ${posAnalysis}`,
@@ -331,11 +345,13 @@ export const getTradingDecision = async (
     apiKey: string,
     marketData: MarketDataCollection,
     accountData: AccountContext,
-    logs: SystemLog[]
+    logs: SystemLog[],
+    enabledCoins: string[] = []
 ): Promise<AIDecision[]> => {
     const promises = Object.keys(COIN_CONFIG).map(async (coinKey) => {
         if (!marketData[coinKey]) return null;
-        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, logs);
+        const isEnabled = enabledCoins.length === 0 || enabledCoins.includes(coinKey);
+        return await analyzeCoin(coinKey, apiKey, marketData[coinKey], accountData, logs, isEnabled);
     });
 
     const results = await Promise.all(promises);
