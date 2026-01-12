@@ -1,8 +1,9 @@
 
 import React, { useState } from 'react';
 import { AppConfig } from '../types';
-import { X, Save, AlertTriangle, Activity, CheckCircle, AlertCircle } from 'lucide-react';
+import { X, Save, AlertTriangle, Activity, CheckCircle, AlertCircle, Coins } from 'lucide-react';
 import { testConnection } from '../services/aiService';
+import { COIN_CONFIG } from '../constants';
 
 interface Props {
   isOpen: boolean;
@@ -31,10 +32,19 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave }) => 
     }
   };
 
+  const toggleCoin = (coin: string) => {
+    const current = localConfig.enabledCoins || [];
+    if (current.includes(coin)) {
+      setLocalConfig({ ...localConfig, enabledCoins: current.filter(c => c !== coin) });
+    } else {
+      setLocalConfig({ ...localConfig, enabledCoins: [...current, coin] });
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-      <div className="bg-okx-card border border-okx-border rounded-xl w-full max-w-lg shadow-2xl">
-        <div className="flex justify-between items-center p-6 border-b border-okx-border">
+      <div className="bg-okx-card border border-okx-border rounded-xl w-full max-w-lg shadow-2xl flex flex-col max-h-[90vh]">
+        <div className="flex justify-between items-center p-6 border-b border-okx-border shrink-0">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             系统设置
           </h2>
@@ -43,7 +53,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave }) => 
           </button>
         </div>
 
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto custom-scrollbar flex-1">
           {/* Simulation Toggle */}
           <div className="flex items-center justify-between bg-okx-bg p-4 rounded-lg border border-okx-border">
             <div>
@@ -59,6 +69,33 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave }) => 
               />
               <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-okx-primary"></div>
             </label>
+          </div>
+
+          {/* Coin Admission Selector */}
+          <div className="space-y-3">
+            <label className="block text-sm font-medium text-okx-subtext flex items-center gap-2">
+                <Coins size={14} /> 交易币种准入开关 (控制新开仓/滚仓)
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+                {Object.keys(COIN_CONFIG).map(coin => {
+                    const isEnabled = (localConfig.enabledCoins || []).includes(coin);
+                    return (
+                        <button
+                            key={coin}
+                            onClick={() => toggleCoin(coin)}
+                            className={`flex items-center justify-between px-3 py-2 rounded border transition-all ${
+                                isEnabled 
+                                ? 'bg-okx-primary/10 border-okx-primary text-white' 
+                                : 'bg-gray-800/30 border-okx-border text-okx-subtext grayscale'
+                            }`}
+                        >
+                            <span className="text-xs font-bold">{coin}</span>
+                            <div className={`w-2 h-2 rounded-full ${isEnabled ? 'bg-okx-up animate-pulse' : 'bg-gray-600'}`}></div>
+                        </button>
+                    )
+                })}
+            </div>
+            <p className="text-[10px] text-okx-subtext italic">* 禁用币种将停止开新仓，但系统会继续管理已持有的存量仓位直至平仓。</p>
           </div>
 
           {/* DeepSeek Key */}
@@ -132,7 +169,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave }) => 
           )}
         </div>
 
-        <div className="p-6 border-t border-okx-border flex justify-end">
+        <div className="p-6 border-t border-okx-border flex justify-end shrink-0">
           <button 
             onClick={() => onSave(localConfig)}
             className="flex items-center gap-2 bg-okx-primary hover:bg-blue-600 text-white px-6 py-2 rounded font-medium transition-colors"
