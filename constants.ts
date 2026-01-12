@@ -16,8 +16,8 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
   },
   BNB: {
     instId: "BNB-USDT-SWAP",
-    contractVal: 0.01, // OKX Standard for BNB (Note: Check if it's 0.01 or 0.1 on actual exchange, usually varies, keeping logic generic)
-    tickSize: 0.1, // Adjusted tick size usually 0.01 or 0.1
+    contractVal: 0.01, 
+    tickSize: 0.1, 
     displayName: "BNB",
     minSz: 1
   },
@@ -44,14 +44,11 @@ export const COIN_CONFIG: Record<string, { instId: string; contractVal: number; 
   }
 };
 
-// Deprecated single constants, kept for reference but unused in new logic
 export const INSTRUMENT_ID = "ETH-USDT-SWAP";
 export const CONTRACT_VAL_ETH = 0.1;
 
-// 费率设定 (保守估计 Taker 0.05%)
 export const TAKER_FEE_RATE = 0.0005; 
 
-// 全局默认杠杆
 export const DEFAULT_LEVERAGE = "20";
 
 export const DEFAULT_CONFIG = {
@@ -59,16 +56,16 @@ export const DEFAULT_CONFIG = {
   okxSecretKey: "",
   okxPassphrase: "",
   deepseekApiKey: "", 
-  isSimulation: true, 
+  isSimulation: true,
+  enabledCoins: Object.keys(COIN_CONFIG)
 };
 
-// EMA 趋势策略 - 资金管理规则
 export const STRATEGY_STAGES = {
   ROLLING: {
     name: "EMA 滚仓追踪",
-    initial_risk: 0.05, // 5% Initial Position
-    add_step: 0.05,     // Add 5% per 5% profit (Equity Gain)
-    leverage: 5,        // Default Leverage (Consistent with global)
+    initial_risk: 0.05, 
+    add_step: 0.05,     
+    leverage: 5,        
   }
 };
 
